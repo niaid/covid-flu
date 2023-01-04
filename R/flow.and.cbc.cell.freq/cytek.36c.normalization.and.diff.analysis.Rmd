@@ -1,0 +1,99 @@
+---
+title: "COVID Flu: Cytek 36c cell frequency differential analysis"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup,message=FALSE}
+library(knitr)
+library(dplyr)
+library(SummarizedExperiment)
+source('R/utils/dream.models.R')
+loadLibraries()
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","flow.and.cbc")
+dir.create(output.folder)
+figure.folder <- "figures"
+dir.create(figure.folder)
+
+# 36c cytek cell subset frequencies
+cytek.data.36c <- read.csv(file.path("data","covid_flu.cytek.36c.panel.cell.counts.csv"),check.names = F)
+
+# Subject data within RNA-Seq data
+normalized.rna.data <- readRDS(file.path("data","covid_flu.bulk.rna.count.data.RDS"))
+sample.info <- as.data.frame(colData(normalized.rna.data))
+subject.visit.info <- unique(sample.info[,1:9])
+
+rownames(subject.visit.info) <- paste0(subject.visit.info$alt.subject.id,".",subject.visit.info$visit)
+```
+
+#### Normalization
+Calculate 36c frequencies as % live cells
+```{r normalize.36c}
+normalize.by <- "Live"
+# recalculate as proportion of live cells
+cytek.data.36c[,-c(1:3)] <- cytek.data.36c[,-c(1:3)]/cytek.data.36c[,normalize.by]
+# only downstream populations are further analyzed
+cytek.populations <- colnames(cytek.data.36c)
+cytek.populations <- cytek.populations[-c(1:grep(normalize.by,cytek.populations))]
+
+cytek.36c.freq <- merge(subject.visit.info,cytek.data.36c,by=c("alt.subject.id","visit"),all.y=T)
+cat("Number of subjects:",length(unique(cytek.36c.freq$alt.subject.id)),"\n")
+table(cytek.36c.freq$visit)
+
+saveRDS(cytek.36c.freq,file.path(output.folder,paste0("covid_flu.cytek.36c.freq.as.prop.of.",normalize.by,".RDS")))
+```
+
+#### Baseline differential analysis
+what are the differences at day 0 before flu vaccination?
+```{r baseline.model}
+baseline.cytek.36c.freq <- subset(cytek.36c.freq,visit == "Day 0")
+freq.w.offset <- add.dynamic.offset(baseline.cytek.36c.freq[,cytek.populations])
+baseline.model.fit <- baseline.condition.model(log2(t(freq.w.offset)),
+                                               baseline.cytek.36c.freq,random.effects = "batch")
+baseline.model.de.res <- model.term.statistics(baseline.model.fit,c("COVR.v.HC","COVR.male.v.female","COVR.m","COVR.f"))
+
+write.csv(baseline.model.de.res,
+          file.path(output.folder,paste0("covid_flu.cytek.36c.freq.as.prop.of.",normalize.by,".difference.at.baseline.csv")),row.names = F)
+```
+
+#### Association with time since diagnosis
+Are any of the cell frequencies associated with TSD at baseline?
+```{r tsd.asso.model}
+baseline.cytek.36c.freq.w.tsd <- subset(baseline.cytek.36c.freq,!is.na(covid.diagnosis.start.date.to.sample.drawn))
+
+tsd.model.fit <- baseline.tsd.association.model(t(apply(baseline.cytek.36c.freq.w.tsd[,cytek.populations],2,rank)),
+                                               baseline.cytek.36c.freq.w.tsd,random.effects = "batch")
+tsd.model.de.res <- model.term.statistics(tsd.model.fit,grep("TSD",colnames(tsd.model.fit$coefficients),value=T))
+write.csv(tsd.model.de.res,file.path(output.folder,paste0("covid_flu.cytek.36c.freq.as.prop.of.",normalize.by,".tsd.association.at.baseline.csv")),row.names = F)
+
+```
+
+#### Contrast vaccination timepoints with baseline
+Include only subjects < 65 years of age
+```{r timepoint.model}
+cytek.36c.freq.under65 <- subset(cytek.36c.freq,age < 65)
+
+freq.w.offset <- add.dynamic.offset(cytek.36c.freq.under65[,cytek.populations])
+timepoint.model.fit <- timepoint.condition.model(log2(t(freq.w.offset)),
+                                                     cytek.36c.freq.under65,c("Day 0"),additional.fixed.effects = "batch")
+timepoint.model.de.res <- model.term.statistics(timepoint.model.fit,grep("^(Baseline|D7)",colnames(timepoint.model.fit$coefficients),value = T))
+timepoint.model.de.res[,c("visit","contrast")] <- do.call(rbind,sapply(timepoint.model.de.res$term,stringi::stri_split_fixed,pattern=".",n=2))
+write.csv(timepoint.model.de.res,
+          file.path(output.folder,paste0("covid_flu.cytek.36c.freq.as.prop.of.",normalize.by,".timepoint.diff.under65.csv")),row.names = F)
+```
+
+#### Session Info
+```{r}
+sessionInfo()
+```

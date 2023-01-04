@@ -1,0 +1,109 @@
+---
+title: "COVID Flu: Selected baseline cell populations"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+#### Import data
+```{r setup,message=FALSE}
+library(knitr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(ggsci)
+library(SummarizedExperiment)
+source('R/utils/visualization.R')
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","flow.and.cbc")
+dir.create(output.folder)
+figure.folder <- "figures"
+dir.create(figure.folder)
+
+# 36c cytek cell subset frequencies
+cytek.36c.freq <- readRDS(file.path(output.folder,"covid_flu.cytek.36c.freq.as.prop.of.Live.RDS"))
+cytek.populations <- colnames(cytek.36c.freq)[-c(1:10)]
+
+# TBNK
+tbnk.data <- read.csv(file.path("data","covid_flu.cbc.tbnk.data.csv"),check.names = F)
+cbc.params <- colnames(tbnk.data)[-c(1:10)]
+```
+
+#### Group Differences
+Figs. 1c, 1d, ED Fig. 1f
+```{r boxplot,fig.cap=c("Fig. 1c","Fig. 1d","ED Fig. 1f")}
+tbnk.data.baseline <- subset(tbnk.data,visit %in% c("Day 0","Day -7"))
+tbnk.data.baseline.mean <- as.data.frame(tbnk.data.baseline %>% group_by(alt.subject.id,group,sex) %>% summarise_at(.vars=cbc.params,mean))
+cytek.36c.freq.baseline <- subset(cytek.36c.freq,visit == "Day 0")
+
+merged.baseline <- merge(cytek.36c.freq.baseline,tbnk.data.baseline.mean,by=c("alt.subject.id","sex","group"),all=T)
+merged.baseline.melted <- reshape2::melt(merged.baseline,id.vars = colnames(merged.baseline)[1:10],variable.name = "parameter")
+
+# barplots
+# DCs, create a gap at 0.02
+tmp <- subset(merged.baseline.melted,parameter %in% c("CD11c+DCs"))
+tmp$sub0.02 <- ifelse(tmp$value > 0.02,tmp$value - 0.005,tmp$value)
+overall.group.sex.barplot(tmp,"value","sub0.02") + scale_y_continuous(breaks=c(0,0.005,0.01,0.015,0.02),labels = c("0.0",0.005,0.01,0.015,0.025)) +
+  ylab("CD11c+ DCs")
+ggsave(file.path(figure.folder,"Fig1c.pdf"),width=3.5,height=3.25)
+
+# monocytes
+overall.group.sex.barplot(subset(merged.baseline.melted,parameter == "Monocytes % of Parent (%)"),"value") + 
+  ylab("% of Monocytes")
+ggsave(file.path(figure.folder,"Fig1d.pdf"),width=3.5,height=3.25)
+
+# T-cells, skip 0 - 45
+tmp <- subset(merged.baseline.melted,parameter %in% c("CD3 % of Parent (%)")) 
+tmp$value.sub45 <- tmp$value - 45
+overall.group.sex.barplot(tmp,"value.sub45") + ylab("% of CD3 cells") + scale_y_continuous(breaks=c(0,5,25,45),labels = c(0,50,70,90))
+ggsave(file.path(figure.folder,"ED.Fig1f.pdf"),width=3.5,height=3.25)
+
+```
+
+#### TSD Distribution
+ED Fig. 1a
+```{r tsd,fig.cap=c("ED Fig. 1a")}
+subject.visit.info.d0 <- subset(tbnk.data,visit == "Day 0")
+table(subject.visit.info.d0$group,subject.visit.info.d0$sex)
+
+ggplot(subset(subject.visit.info.d0,group == "COVR"),aes(sex,covid.diagnosis.start.date.to.sample.drawn)) + 
+  geom_boxplot(color="#374E55FF") + geom_point(aes(color=sex),alpha=0.75,size=2) + scale_color_nejm() + theme_bw() + 
+  stat_compare_means(comparisons = list(c(1,2))) + ylab("Time since diagnosis (Days)") + ylim(40,280) + 
+  coord_flip()
+ggsave(file.path(figure.folder,"ED.Fig1a.pdf"),width=5,height=1.5)
+```
+
+#### Baseline Correlation with TSD
+use only D0 to plot ED Figs. 1c and 1d
+```{r tsd.correlation,fig.cap=c("ED Fig. 1c","ED Fig. 1d")}
+tbnk.data.baseline <- subset(tbnk.data,visit %in% c("Day 0"))
+
+merged.baseline <- merge(tbnk.data.baseline,cytek.36c.freq.baseline[,c("alt.subject.id",cytek.populations)],by="alt.subject.id",all=T)
+merged.baseline.melted <- reshape2::melt(merged.baseline,
+                                         id.vars = colnames(merged.baseline)[1:10],
+                                         variable.name = "parameter")
+
+
+# monocytes
+pop <- "Monocytes % of Parent (%)"
+tsd.scatter.plot(subset(merged.baseline.melted,parameter == pop),"value") + ylab(pop) + theme(aspect.ratio = 1)
+ggsave(file.path(figure.folder,"ED.Fig.1c.pdf"),width=3.75,height=2.5)
+# DCs
+pop <- "CD11c+DCs"
+tsd.scatter.plot(subset(merged.baseline.melted,parameter == pop),"value") + ylab(pop) + theme(aspect.ratio = 1)
+ggsave(file.path(figure.folder,"ED.Fig.1d.pdf"),width=3.75,height=2.5)
+```
+
+#### Session Info
+```{r}
+sessionInfo()
+```

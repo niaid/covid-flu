@@ -1,0 +1,75 @@
+---
+title: "stim_flow_stat"
+output: html_document
+date: '2022-12-25'
+---
+
+```{r setup, message=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(tidyverse)
+library(ggpubr)
+```
+
+flow in vitro stim data. Generates Fig 3i, Extended Data Fig 4j and Supplemental Fig 6b
+```{r utility_fun}
+plot_celltype_cytokine <- function(df){
+  my_comparisons1 <- list(c("HC.Female","COVR.Female"), c("HC.Female","HC.Male"), c("COVR.Female","COVR.Male"), c("HC.Male","COVR.Male"))
+  p <- ggplot(df, aes(x = group.sex, y = value))+
+    geom_boxplot(aes(fill = sex, color = sex, alpha = 0.4), outlier.shape = NA)+
+    # geom_point(aes(color = sex, shape = Batch), size = 3, position = position_jitter(w = 0.2)) +
+    geom_point(aes(fill = sex), shape = 21, color = "white", size = 3, position = position_jitter(w = 0.2)) +
+    scale_color_manual(values = c("Female" = "#BD3B29", "Male" = "#0472B6"))+
+    scale_fill_manual(values = c("Female" = "#BD3B29", "Male" = "#0472B6"))+
+    stat_compare_means(comparison = my_comparisons1, method = "wilcox.test", size = 5)+
+    facet_wrap(~celltype+cytokine, ncol = 4, scales = "free")+
+    ggtitle(unique(df$stim))+
+    theme_bw(base_size = 15)+
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  p
+  
+  return(p)
+}
+```
+
+
+
+  
+## Fig 3i
+```{r Fig3i, fig.width=8.6, fig.height=5, warning=FALSE}
+freq_totarget <- read.csv("flow_freq_totarget_cytokine_subsets.csv") %>% 
+    dplyr::mutate(group.sex = factor(group.sex, levels = c("HC.Female", "COVR.Female", "HC.Male", "COVR.Male", "Tech_ctrl.NA")))
+
+celltype1 = c("CD8_GPR56+CD45RAhi","CD8_KIRCD45RAhi")
+freq_totarget_il15_main <- filter(freq_totarget, stim == "IL15", 
+                             cytokine == "IFNg", 
+                             celltype %in% celltype1)
+plot_celltype_cytokine(freq_totarget_il15_main)
+```
+  
+  
+## Extended Data Fig4j
+```{r EDFig4j, fig.width=11.5, fig.height=5, warning=FALSE}
+celltype2 = c("NK","CD8_CD45RA+RO-","MAIT")
+freq_totarget_il15_ed <- filter(freq_totarget, stim == "IL15", 
+                             cytokine == "IFNg", 
+                             celltype %in% celltype2) %>%
+  mutate(celltype = factor(celltype, levels = celltype2))
+plot_celltype_cytokine(freq_totarget_il15_ed)
+```
+
+
+## Supplementary Fig6b
+```{r Supfig6, fig.width=13, fig.height=9.2, warning=FALSE}
+celltype3 = c("CD8_GPR56+CD45RAhi","CD8_KIRCD45RAhi","NK","CD8_CD45RA+RO-","MAIT")
+freq_totarget_il115il12il18 <- filter(freq_totarget, stim == "IL15_IL12_IL18", 
+                             cytokine == "IFNg", 
+                             celltype %in% celltype3) %>%
+  mutate(celltype = factor(celltype, levels = celltype3))
+plot_celltype_cytokine(freq_totarget_il115il12il18)
+```
+
+  
+```{r}
+sI <- sessionInfo()
+utils:::print.sessionInfo(sI[-c(10,11)])
+```

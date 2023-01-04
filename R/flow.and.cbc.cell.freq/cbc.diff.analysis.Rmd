@@ -1,0 +1,98 @@
+---
+title: "COVID Flu: CBC cell frequency differential analysis"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup,message=FALSE}
+library(knitr)
+library(dplyr)
+library(SummarizedExperiment)
+library(BiocParallel)
+param = SnowParam(32,"SOCK",progressbar = T)
+register(param)
+source('R/utils/dream.models.R')
+loadLibraries()
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","flow.and.cbc")
+dir.create(output.folder)
+figure.folder <- "figures"
+dir.create(figure.folder)
+
+# TBNK
+tbnk.data <- read.csv(file.path("data","covid_flu.cbc.tbnk.data.csv"),check.names = F)
+cbc.params <- colnames(tbnk.data)[11:43]
+pct_or_ratio <- "%|Ratio"
+```
+
+#### Baseline Model
+Using both D0 and baseline (day -7) samples, what are the differences before flu vaccination?
+```{r baseline.model}
+baseline.tbnk.data <- subset(tbnk.data,visit %in% c("Day -7","Day 0"))
+freq.w.offset.pct <- add.dynamic.offset(baseline.tbnk.data[,grep(pct_or_ratio,cbc.params,value = T)])
+baseline.model.fit.pct <- baseline.condition.model(log2(t(freq.w.offset.pct)),baseline.tbnk.data)
+baseline.model.de.res.pct <- model.term.statistics(baseline.model.fit.pct,c("COVR.v.HC","COVR.male.v.female","COVR.m","COVR.f"))
+
+freq.w.offset.abs <- add.dynamic.offset(baseline.tbnk.data[,grep(pct_or_ratio,cbc.params,value = T,invert=T)])
+baseline.model.fit.abs <- baseline.condition.model(log2(t(freq.w.offset.abs)),baseline.tbnk.data)
+baseline.model.de.res.abs <- model.term.statistics(baseline.model.fit.abs,c("COVR.v.HC","COVR.male.v.female","COVR.m","COVR.f"))
+
+baseline.model.de.res <- rbind(cbind(type="Abs",baseline.model.de.res.abs),cbind(type="Pct",baseline.model.de.res.pct))
+
+write.csv(baseline.model.de.res,file.path(output.folder,"covid_flu.cbc.difference.at.baseline.csv"),row.names = F)
+```
+
+#### Association with time since diagnosis
+Are any of the parameters associated with TSD at baseline?
+```{r tsd.asso.model}
+baseline.tbnk.data.w.tsd <- subset(baseline.tbnk.data,!is.na(covid.diagnosis.start.date.to.sample.drawn))
+
+tsd.model.fit.pct <- baseline.tsd.association.model(t(apply(baseline.tbnk.data.w.tsd[,grep(pct_or_ratio,cbc.params,value = T)],2,rank)),
+                                                         baseline.tbnk.data.w.tsd)
+tsd.model.de.res.pct <- model.term.statistics(tsd.model.fit.pct,grep("TSD",colnames(tsd.model.fit.pct$coefficients),value=T))
+tsd.model.fit.abs <- baseline.tsd.association.model(t(apply(baseline.tbnk.data.w.tsd[,grep(pct_or_ratio,cbc.params,value = T,invert = T)],2,rank)),
+                                                         baseline.tbnk.data.w.tsd)
+tsd.model.de.res.abs <- model.term.statistics(tsd.model.fit.abs,grep("TSD",colnames(tsd.model.fit.abs$coefficients),value=T))
+
+tsd.model.de.res <- rbind(cbind(type="Abs",tsd.model.de.res.abs),cbind(type="Pct",tsd.model.de.res.pct))
+write.csv(tsd.model.de.res,file.path(output.folder,"covid_flu.cbc.tsd.association.at.baseline.csv"),row.names = F)
+
+```
+
+#### Contrast vaccination timepoints with baseline
+Include only subjects < 65 years of age. Impute missing values.
+```{r timepoint.model}
+tbnk.data.under65 <- subset(tbnk.data,age < 65)
+
+freq.w.offset.pct <- add.dynamic.offset(tbnk.data.under65[,grep(pct_or_ratio,cbc.params,value = T)])
+imputed.data.pct <- impute::impute.knn(log2(t(freq.w.offset.pct)))$data
+timepoint.model.fit.pct <- timepoint.condition.model(imputed.data.pct,tbnk.data.under65,c("Day -7","Day 0"))
+timepoint.model.de.res.pct <- model.term.statistics(timepoint.model.fit.pct,grep("sex.diff$|COVR.v.HC$|COVR.[mf]$|sub.baseline$|v.baseline",
+                                                                         colnames(timepoint.model.fit.pct$coefficients),value = T))
+
+freq.w.offset.abs <- add.dynamic.offset(tbnk.data.under65[,grep(pct_or_ratio,cbc.params,value = T,invert = T)])
+imputed.data.abs <- impute::impute.knn(log2(t(freq.w.offset.abs)))$data
+timepoint.model.fit.abs <- timepoint.condition.model(imputed.data.abs,tbnk.data.under65,c("Day -7","Day 0"))
+timepoint.model.de.res.abs <- model.term.statistics(timepoint.model.fit.abs,grep("sex.diff$|COVR.v.HC$|COVR.[mf]$|sub.baseline$|v.baseline",
+                                                                         colnames(timepoint.model.fit.abs$coefficients),value = T))
+
+timepoint.model.de.res <- rbind(cbind(type="Abs",timepoint.model.de.res.abs),cbind(type="Pct",timepoint.model.de.res.pct))
+timepoint.model.de.res[,c("visit","contrast")] <- do.call(rbind,sapply(timepoint.model.de.res$term,stringi::stri_split_fixed,pattern=".",n=2))
+write.csv(timepoint.model.de.res,file.path(output.folder,"covid_flu.cbc.timepoint.diff.under65.csv"),row.names = F)
+```
+
+#### Session Info
+```{r}
+sessionInfo()
+```

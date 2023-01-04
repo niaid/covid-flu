@@ -1,0 +1,171 @@
+---
+title: "COVID Flu: CITE-seq GPR56 surface proteins in CD8 EM cells"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+#### Import Data
+```{r setup,message=FALSE}
+library(knitr)
+library(dplyr)
+library(Seurat)
+library(BiocParallel)
+library(doParallel)
+param = SnowParam(32,"SOCK",progressbar = F)
+register(param)
+registerDoParallel()
+source('R/utils/visualization.R')
+source('R/utils/dream.models.R')
+loadLibraries()
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","CITE-seq")
+dir.create(output.folder)
+figure.folder <- "figures"
+dir.create(figure.folder)
+
+# seurat object
+citeseq.obj <- readRDS(file.path("data","covid_flu.CITEseq.Seurat.obj.RDS"))
+citeseq.obj$overall.group.sex <- paste0(citeseq.obj$group,".",citeseq.obj$sex)
+
+# cite-seq pbulk data
+pseudobulk.list.normalized <- readRDS(file.path(output.folder,"covid_flu.CITEseq.pseudobulk.gene.expr.normalized.RDS"))
+```
+
+#### CD8 EM group markers
+```{r markers}
+# subset to CD8 cells
+citeseq.obj <- subset(citeseq.obj,subset = coarse.cell.type == "CD8")
+de.proteins <- FindMarkers(citeseq.obj,assay = "CITE",slot = "scale.data",
+                           max.cells.per.ident = 10000,only.pos = F,group.by= "cell.type",ident.1 = "CD8_EM",min.pct=0.5)
+write.csv(de.proteins,file.path(output.folder,"cd8.em.vs.other.cd8.de.proteins.csv"),row.names = T)
+
+# subset to CD8 EM cells
+citeseq.obj <- subset(citeseq.obj,subset = cell.type == "CD8_EM")
+de.proteins <- FindMarkers(citeseq.obj,assay = "CITE",slot = "scale.data",
+                           max.cells.per.ident = 5000,only.pos = T,group.by = "overall.group.sex",ident.1 = "COVR.Male",min.pct=0.5)
+write.csv(de.proteins,file.path(output.folder,"cd8.em.covr.males.vs.others.de.proteins.csv"),row.names = T)
+```
+
+#### Classify GPR56+ cells in CD8 EM population
+```{r classify}
+# specify cutoff to divide into GPR56+/- cells
+gpr56.cutoff <- 1.5 
+
+citeseq.obj$GPR56.prot <- GetAssayData(citeseq.obj,assay = "CITE")["PROT-GPR56",]
+citeseq.obj$GPR56.prot.scaled <- GetAssayData(citeseq.obj,assay = "CITE",slot = "scale.data")["PROT-GPR56",] # batch-corrected
+citeseq.obj.meta <- citeseq.obj[[]]
+
+# divided into classes
+citeseq.obj.meta$GPR56.prot.class <- ifelse(citeseq.obj.meta$GPR56.prot > gpr56.cutoff,"GPR56+","GPR56-")
+
+parameters.of.interest <- c("alt.subject.id","visit","group","sex","overall.group.sex","age","race","flu.vax.count.10yr")
+```
+
+Fig. 3b
+```{r Fig3b}
+tmp <- as.data.frame(citeseq.obj.meta %>% group_by(across(all_of(parameters.of.interest))) %>% 
+                              summarize(`PROT-GPR56` = mean(GPR56.prot.scaled)))
+
+overall.sex.group.boxplot(subset(tmp,visit == "Day 0"),"PROT-GPR56") +
+  scale_y_continuous(expand = c(0.03,0.17)) +
+  theme_bw(base_size = 12) + ggtitle("D0 CD8 EM") + ylab("GPR56\nSurface Protein Expression") + xlab("")
+ggsave(file.path(figure.folder,paste0("Fig3b.pdf")),height=3,width=4)
+```
+
+#### Frequency differences between groups
+```{r frequencies}
+CD8.em.class.counts.by.subject <- as.data.frame(citeseq.obj.meta %>% group_by(across(all_of(c(parameters.of.interest,"GPR56.prot.class")))) %>% 
+  summarise(count=length(age)) %>% group_by(alt.subject.id,visit) %>% mutate(total=sum(count)))
+CD8.em.class.counts.by.subject$fraction.of.CD8.em <- CD8.em.class.counts.by.subject$count/CD8.em.class.counts.by.subject$total
+```
+
+Fig. 3e
+```{r Fig3e}
+tmp <- subset(CD8.em.class.counts.by.subject,visit %in% c("Day 0") & GPR56.prot.class == "GPR56+")
+overall.group.sex.barplot(tmp,"fraction.of.CD8.em") + ylab("D0 GPR56+ Frequency\n(Fraction of CD8 EM cells)")
+ggsave(file.path(figure.folder,"Fig3e.pdf"),width=3.5,height=3)
+```
+
+#### IFN DE analysis
+```{r de}
+ifn.de.res <- data.frame()
+for (i in c("CD8_EM:GPR56hi","CD8_EM:GPR56lo")) {
+  samples <- pseudobulk.list.normalized[[i]]
+  geneExpr <- samples$counts
+  sample.info <- samples$samples
+  include.samples <- subset(sample.info,alt.subject.id != "Control")
+  samples <- samples[,rownames(include.samples)]
+  
+  if (sum(table(include.samples$overall.group.sex) == 0) == 0) {
+    model <- as.formula(paste0("~ 0 + visit.overall.group.sex + age + race + flu.vax.count.10yr + n_barcodes + (1|Batch) + (1|alt.subject.id)"))
+    vobjDream <- voomWithDreamWeights(samples, model, include.samples,plot=T)
+    
+    # using D0 only as pre-vax baseline
+    timepoint.model.fit <- timepoint.condition.model(vobjDream[grep("IFN",rownames(vobjDream)),],
+                                                     include.samples,c("Day 0"),additional.random.effects = "Batch",additional.fixed.effects = "n_barcodes")
+    # timepoint group diff
+    timepoint.model.de.res <- model.term.statistics(timepoint.model.fit,
+                                                    grep("sex.diff$|COVR.v.HC$|COVR.[mf]$|sub.baseline$|v.baseline",
+                                                         colnames(timepoint.model.fit$coefficients),value = T))
+    ifn.de.res <- rbind(ifn.de.res,cbind(cell.type=i,timepoint.model.de.res))
+  }
+}
+colnames(ifn.de.res)[3] <- "gene.symbol"
+ifn.de.res[,c("visit","contrast")] <-  
+        do.call(rbind,sapply(ifn.de.res$term,stringi::stri_split_fixed,pattern=".",n=2))
+```
+
+ED Fig. 4c and Supp Fig. 5c: IFNG expression changes between D0 and D1 in GPR56+/- cells
+```{r ifng.expr,fig.cap=c("ED Fig. 4c","Supp Fig. 5c")}
+# D1 vs. D0 model results
+cd8.em.gpr56.de.res.IFNG <- subset(ifn.de.res,gene.symbol == "IFNG")
+d1.v.baseline.IFNG.de.res <- subset(cd8.em.gpr56.de.res.IFNG[grep("^v.baseline",cd8.em.gpr56.de.res.IFNG$contrast),],visit == "D1")
+IFNG.pval.df <- d1.v.baseline.IFNG.de.res[,c("cell.type","term","P.Value")]
+IFNG.pval.df[,c("group","sex")] <- do.call("rbind",sapply(IFNG.pval.df$term,strsplit,".",fixed=T))[,4:5]
+IFNG.pval.df$group1 <- paste0(IFNG.pval.df$group,"\nD0")
+IFNG.pval.df$group2 <- paste0(IFNG.pval.df$group,"\nD1")
+IFNG.pval.df$p <- sprintf("%.3f",IFNG.pval.df$P.Value)
+
+cd8.em.GPR56hi.samples <- pseudobulk.list.normalized[["CD8_EM:GPR56hi"]]$samples
+cd8.em.GPR56hi.samples$IFNG <- pseudobulk.list.normalized[["CD8_EM:GPR56hi"]]$normalizedExpr["IFNG",]
+overall.group.visit.change.boxplot(subset(cd8.em.GPR56hi.samples,visit %in% c("Day 0","Day 1")),"IFNG",subset(IFNG.pval.df,cell.type == "CD8_EM:GPR56hi")) +
+  ylab("GPR56+ CD8 EM\nIFNG expression") + xlab("")
+ggsave(file.path(output.folder,"ED.Fig4c.pdf"),width=5.75,height=3)
+
+cd8.em.GPR56lo.samples <- pseudobulk.list.normalized[["CD8_EM:GPR56lo"]]$samples
+cd8.em.GPR56lo.samples$IFNG <- pseudobulk.list.normalized[["CD8_EM:GPR56lo"]]$normalizedExpr["IFNG",]
+overall.group.visit.change.boxplot(subset(cd8.em.GPR56lo.samples,visit %in% c("Day 0","Day 1")),"IFNG",subset(IFNG.pval.df,cell.type == "CD8_EM:GPR56lo")) +
+  ylab("GPR56- CD8 EM\nIFNG expression") + xlab("")
+ggsave(file.path(figure.folder,"Supp.Fig5c.pdf"),width=5.75,height=3)
+```
+
+ED Fig. 4d: Comparing GPR56+ and GPR56- results
+```{r ifng.de.res}
+d1.v.baseline.IFNG.de.res$overall.group.sex <- gsub("v.baseline.","",d1.v.baseline.IFNG.de.res$contrast)
+d1.v.baseline.IFNG.de.res$overall.group.sex <- gsub(".Male","-M",gsub(".Female","-F",d1.v.baseline.IFNG.de.res$overall.group.sex))
+d1.v.baseline.IFNG.de.res$overall.group.sex <- factor(d1.v.baseline.IFNG.de.res$overall.group.sex,levels = c("COVR-M","HC-M","COVR-F","HC-F"))
+d1.v.baseline.IFNG.de.res$sig <- ifelse(d1.v.baseline.IFNG.de.res$P.Value < 0.05,"*","")
+
+ggplot(d1.v.baseline.IFNG.de.res,aes(overall.group.sex,t)) + geom_hline(yintercept = 0,linetype="dashed",color="red") + 
+  geom_bar(stat="identity",aes(fill=cell.type),color="grey30") + 
+  geom_text(aes(label=sig,x=overall.group.sex),y=3,color="red") + 
+  ylim(NA,3) + scale_fill_manual(values=c("#8494FF","#66A182")) + facet_grid(~cell.type) +
+  ggtitle("CD8 EM IFNG expression") + ylab("Vaccine-induced change\nbetween D1 and D0") + xlab("") + coord_flip() + theme_bw()
+ggsave(file.path(figure.folder,"ED.Fig4d.pdf"),height=2,width=5)
+```
+
+#### Session Info
+```{r session}
+sessionInfo()
+```
+

@@ -1,0 +1,65 @@
+---
+title: "COVID Flu: IL-15 expression in monocytes"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+#### Import Data
+```{r setup,message=FALSE}
+library(ggplot2)
+library(knitr)
+library(dplyr)
+source('R/utils/visualization.R')
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","CITE-seq")
+dir.create(output.folder)
+figure.folder <- "figures"
+dir.create(figure.folder)
+
+# cite-seq pbulk data
+pseudobulk.list.filtered <- readRDS(file.path(output.folder,"covid_flu.CITEseq.pseudobulk.gene.expr.filtered.RDS"))
+cat("Cell subsets:",names(pseudobulk.list.filtered))
+
+mono.de.results <- read.csv(file.path(output.folder,"DEA","pseudobulk.Mono_Classical.vaccine.response.gene.csv"))
+```
+
+#### Fig 3j
+Plot IL-15 expression changes between D0 and D1 in classical monocytes
+```{r il15,out.width="800px"}
+# expression by subject
+il15.expr <- sapply(pseudobulk.list.filtered,function(x){if(sum(rownames(x$normalizedExpr) == "IL15") > 0){x$normalizedExpr["IL15",]}})
+il15.expr.df <- as.data.frame(do.call(bind_rows,il15.expr))
+rownames(il15.expr.df) <- names(il15.expr[!sapply(il15.expr,is.null)])
+il15.expr.df <- merge(pseudobulk.list.filtered$Mono_Classical$samples[,c("alt.subject.id","visit","age","sex","group")],t(il15.expr.df),
+                      by="row.names")
+il15.expr.df.mean <- as.data.frame(il15.expr.df[,-1] %>% group_by(alt.subject.id,visit,sex,group) %>% summarise_all(mean))
+
+# D1 vs. D0 model results
+il15.de.results <- subset(mono.de.results,gene.symbol == "IL15" & visit == "D1")
+il15.de.results <- il15.de.results[grep("^v.baseline",il15.de.results$contrast),]
+il15.pval.df <- il15.de.results[,c("term","P.Value")]
+il15.pval.df[,c("group","sex")] <- do.call("rbind",sapply(il15.pval.df$term,strsplit,".",fixed=T))[,4:5]
+il15.pval.df$group1 <- paste0(il15.pval.df$group,"\nD0")
+il15.pval.df$group2 <- paste0(il15.pval.df$group,"\nD1")
+il15.pval.df$p <- sprintf("%.2e",il15.pval.df$P.Value)
+
+overall.group.visit.change.boxplot(subset(il15.expr.df.mean,visit %in% c("Day 0","Day 1")),"Mono_Classical",il15.pval.df) +
+  ylab("Classical monocyte\nIL-15 expression") + xlab("")
+ggsave(file.path(figure.folder,"Fig3j.pdf"),width=6.25,height=3)
+```
+
+#### Session Info
+```{r session}
+sessionInfo()
+```
+
