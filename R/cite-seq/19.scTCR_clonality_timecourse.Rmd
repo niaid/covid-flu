@@ -1,0 +1,133 @@
+---
+title: "scTCR_clonality_timecourse"
+output: html_document
+date: "2023-01-12"
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(ggpubr)
+library(circlize)
+library(tidyverse)
+library(ggpubr)
+library(RColorBrewer)
+```
+
+## single cell major clone freq change in GPR56+ CD8 effector memory (CD8-EM) after vaccination  
+Calculate and plot major TCR clones freq at D0, D1, D28  
+**Generate line charts for Extended Data Figure 4i**  
+**Plotting colors for clones are different from shown in the paper, since the meta data were changed and clones were not ordered as before**   
+Single cell TCR data downloaded from Zenodo and put in data/TCR/ folder as input  
+
+```{r input}
+tcr_combined <- read.csv(file.path("data", "TCR", "tenx_filtered_scTCR_anno.csv"))
+tcr_combined_CD8 <- filter(tcr_combined, coarse.cell.type == "CD8") %>%
+  mutate(cell.type.GPR56 = paste(cell.type, GPR56_level, sep = "-")) %>%
+  mutate(cellsubset = replace(.$cell.type, .$cell.type %in% c("CD8_EM","CD8_TEMRA"), .$cell.type.GPR56[which(.$cell.type %in% c("CD8_EM","CD8_TEMRA"))])) %>%
+  filter(cellsubset %in% c("CD8_CM", "CD8_EM-GPR56-", "CD8_EM-GPR56+", "CD8_Naive", "CD8_TEMRA-GPR56+", "CD8_TRM")) %>%
+  mutate(sample_id = sub(pattern = "Day ", replacement = "D", paste(alt.subject.id, visit, sep = ".")))
+
+# covid only
+tcr_combined_CD8_celltype <- filter(tcr_combined_CD8, 
+                                 cellsubset %in% c("CD8_EM-GPR56+", "CD8_EM-GPR56-", "CD8_Naive", "CD8_CM"), group == "COVR") %>%
+  mutate(cellsubset.subject = paste(cellsubset, alt.subject.id, sep = "."))
+```
+
+Sampling first to make each subject have the same number of cells at each timepoint to avoid bias
+```{r subsample}
+# sample first to make each subject have the same number of cells at each timepoint
+tcr_combined_CD8_celltype_ds <- data.frame()
+for (i in unique(tcr_combined_CD8_celltype$cellsubset.subject)){
+  tmp <- filter(tcr_combined_CD8_celltype, cellsubset.subject == i)
+  set.seed(124)
+  tmp.ds <- tmp %>% group_by(visit) %>% 
+    sample_n(size = min(table(tmp$visit)), replace = F) %>%
+    mutate(sample_rowindex = c(1:unique(table(.$visit))))
+  tcr_combined_CD8_celltype_ds <- rbind(tcr_combined_CD8_celltype_ds, tmp.ds)
+}
+
+tcr_combined_CD8_celltype_ds <- dplyr::arrange(tcr_combined_CD8_celltype_ds, visit, sex, group, alt.subject.id) %>%
+  dplyr::ungroup()
+  
+clone_id <- data.frame(table(tcr_combined_CD8_celltype_ds$CTaa_tcr)) %>%
+  mutate(clone_id = paste("C",1:nrow(.), sep = ""))
+tcr_combined_CD8_celltype_ds2 <- left_join(tcr_combined_CD8_celltype_ds, clone_id, by = c("CTaa_tcr" = "Var1")) %>%
+  mutate(Subject.clone = paste(alt.subject.id, clone_id, sep = ".")) %>%
+  mutate(cellsubset.subject.clone = paste(cellsubset.subject, clone_id, sep = "."))
+tcr_combined_CD8_celltype_ds2 <- tcr_combined_CD8_celltype_ds2[,c("alt.subject.id","visit","sample_id","Timepoint.sex.group","sex","group","cellsubset","sample_rowindex", "clone_id", "barcode.batch", "Subject.clone", "cellsubset.subject","cellsubset.subject.clone")]
+  
+table(tcr_combined_CD8_celltype_ds2$visit)
+
+```
+
+Calculate CD8-EM GPR56+ clone freq overtime  
+```{r clone_freq}
+tcr_combined_CD8_GPR56_ds <- filter(tcr_combined_CD8_celltype_ds2, cellsubset == "CD8_EM-GPR56+", group == "COVR")
+table(tcr_combined_CD8_GPR56_ds$visit)
+
+# filter out subjects with too few cells
+# since it's already ds to have same cells per timepoint, only need to filter for any timepoint
+tmp = data.frame(table(tcr_combined_CD8_GPR56_ds$alt.subject.id,tcr_combined_CD8_GPR56_ds$visit)) %>%
+  filter(Var2 == "Day 0") %>%
+  dplyr::arrange(desc(Freq)) %>%
+  filter(Freq > 30)
+tcr_combined_CD8_GPR56_ds <- tcr_combined_CD8_GPR56_ds %>%
+  filter(alt.subject.id %in% tmp$Var1)
+table(tcr_combined_CD8_GPR56_ds$visit)
+
+# clone freq
+tcr_combined_CD8_GPR56_ds_freq <- data.frame(table(tcr_combined_CD8_GPR56_ds$cellsubset.subject.clone, tcr_combined_CD8_GPR56_ds$visit))
+tcr_combined_CD8_GPR56_ds_freq$celltype <- sapply(str_split(tcr_combined_CD8_GPR56_ds_freq$Var1, pattern = "\\."), function(x)x[1])
+tcr_combined_CD8_GPR56_ds_freq$Subject <- sapply(str_split(tcr_combined_CD8_GPR56_ds_freq$Var1, pattern = "\\."), function(x)x[2])
+
+# add metadata
+subject_meta = read.csv("data/covid.flu.subject.meta.csv") %>% 
+  filter(alt.subject.id %in% unique(tcr_combined_CD8_GPR56_ds_freq$Subject))
+tcr_combined_CD8_GPR56_ds_freq <- left_join(tcr_combined_CD8_GPR56_ds_freq, subject_meta, by = c("Subject" = "alt.subject.id"))
+tcr_combined_CD8_GPR56_ds_freq$sex.group <- factor(paste(tcr_combined_CD8_GPR56_ds_freq$sex, tcr_combined_CD8_GPR56_ds_freq$overall.group, sep = "."), levels = c("Female.HC","Female.COVR","Male.HC","Male.COVR"))
+tcr_combined_CD8_GPR56_ds_freq$celltype.subject <- paste(tcr_combined_CD8_GPR56_ds_freq$celltype, tcr_combined_CD8_GPR56_ds_freq$Subject, sep = ".")
+
+
+tcr_combined_CD8_GPR56_ds_freq <- tcr_combined_CD8_GPR56_ds_freq %>%
+  group_by(Var2, Subject) %>%
+  mutate(ratio = Freq/sum(Freq))
+```
+
+Linechart plot for CD8-EM GPR56+ clone freq overtime   
+**Extended Data Fig 4i linechart**  
+```{r clone_freq_plot, fig.width = 4, fig.height = 3.7}
+ring_colors <- list(c("#CDF0EA","grey80","#C7D36F"), 
+                    c(brewer.pal(n = 8,name = "Set1"),
+                      brewer.pal(n = 8,name = "Set2"),
+                      brewer.pal(n = 8,name = "Set3")))
+clone_colors = data.frame("clone_colors" = c(rep(ring_colors[[2]],54), "#E41A1C", "#377EB8" ), "clone_id" = unique(tcr_combined_CD8_GPR56_ds_freq$Var1))
+
+# pdf("figures/CD8_GPR56high_majorclone_freq_timepoint.EDFig4i.pdf", width = 4, height = 3.7)
+my_comparisons1 <- list( c("Day 0", "Day 1"), c("Day 0", "Day 28"), c("Day 1","Day 28"))
+ggplot(tcr_combined_CD8_GPR56_ds_freq, aes(x = Var2, y = ratio, color = Var1)) +
+  geom_point(size = 2)+
+  geom_line(aes(group = Var1)) +
+  scale_color_manual(values=clone_colors$clone_colors)+
+  stat_compare_means(comparisons = my_comparisons1, method = "wilcox.test", size = 5, paired = TRUE, label.y = c(0.35,0.4,0.45))+
+  guides(color = "none")+
+  theme_bw(base_size = 20)+
+  ylim(c(0,0.6))
+# dev.off()
+
+```
+
+
+SessionInfo  
+```{r}
+sI <- sessionInfo()
+utils:::print.sessionInfo(sI[-c(10,11)])
+```
+
+
+
+
+
+
+
+
+

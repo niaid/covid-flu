@@ -1,0 +1,63 @@
+---
+title: "COVID Flu: D7 signals from external gene sigature"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+A signature from NAKAYA et al. (2011) consisting of genes whose day 7 increase after flu vaccination are correlated with day 28 antibody response
+```{r setup, message=F}
+library(knitr)
+library(dplyr)
+library(SummarizedExperiment)
+source('R/utils/visualization.R')
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","rna-seq")
+dir.create(output.folder)
+figure.folder <- "figures"
+dir.create(figure.folder)
+
+# Subject data within RNA-Seq data
+#normalized.rna.data <- readRDS(file.path("output","rna-seq","covid_flu.normalized.rna.data.RDS"))
+normalized.rna.data <- readRDS(file.path("data","covid_flu.normalized.rna.data.RDS"))
+
+# gene signature (from MSigDB)
+gene.signature.gmt <- clusterProfiler::read.gmt(file.path("data","c7.vax.v7.3.symbols.gmt"))
+gene.signature.list <- aggregate(gene.signature.gmt$gene,list(gene.signature.gmt$term),paste0)
+names(gene.signature.list$x) <- make.names(gene.signature.list$Group.1)
+gene.signature.list <- gene.signature.list$x
+```
+
+#### Day 7 group difference
+```{r ifng.sig,fig.cap="ED Fig. 3c"}
+baseline.timepoints <- "Day 0"
+geneset.of.interest <- "NAKAYA_PBMC_FLUARIX_FLUVIRIN_AGE_18_50YO_CORRELATED_WITH_HAI_28DY_RESPONSE_AT_7DY_POSITIVE"
+demo.params <- c("alt.subject.id","visit","sex","group","age","race","flu.vax.count.10yr","covid.diagnosis.start.date.to.sample.drawn")
+
+# calculate module scores
+normalized.expr.batch.effect.filtered <- assays(normalized.rna.data)$seqRUV.norm.count
+rownames(normalized.expr.batch.effect.filtered) <- rowData(normalized.rna.data)[rownames(normalized.expr.batch.effect.filtered),]$symbol
+sample.signature.scores <- GSVA::gsva(normalized.expr.batch.effect.filtered,gene.signature.list[geneset.of.interest],parallel.sz=1,min.sz=5)
+
+response.signature <- as.data.frame(cbind(colData(normalized.rna.data)[,demo.params],t(sample.signature.scores)))
+d7.response.signature.mean <- as.data.frame(subset(response.signature,visit == "Day 7") %>% group_by(across(all_of(demo.params))) %>% 
+  summarise_at(.vars = grep(geneset.of.interest,colnames(response.signature),value=T),mean))
+
+overall.group.sex.boxplot(subset(d7.response.signature.mean,age < 65),geneset.of.interest) + 
+  ylab("D7 module scores") + ggtitle("NAKAYA et al., 2011")
+ggsave(file.path(figure.folder,"ED.Fig3c.pdf"),width=3,height=3)
+```
+
+#### Session Info
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,158 @@
+---
+title: "COVID Flu: Whole-blood and serum IFNG Day 1 increase"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+Correlation of IFNG bulk gene expression and serum protein D1 increase with 
+1) D7 PB increase (cell frequencies and gene signature) and 
+2) baseline cell frequencies
+```{r setup, message=F}
+library(knitr)
+library(dplyr)
+library(SummarizedExperiment)
+source('R/utils/visualization.R')
+source('R/utils/dream.models.R')
+loadLibraries()
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","multimodal")
+dir.create(output.folder)
+figure.folder <- "figures"
+dir.create(figure.folder)
+
+# Subject data within RNA-Seq data
+#normalized.rna.data <- readRDS(file.path("output","rna-seq","covid_flu.normalized.rna.data.RDS"))
+normalized.rna.data <- readRDS(file.path("data","covid_flu.normalized.rna.data.RDS"))
+
+# whole-blood and serum IFNG
+ifng.expr.signature.mean <- readRDS(file.path(output.folder,"bulk.IFNG.sig.scores.and.fc.RDS"))
+olink.sample.info.mean <- readRDS(file.path(output.folder,"serum.IFNG.protein.level.and.fc.RDS"))
+
+# cell frequencies
+cytek.36c.freq <- readRDS(file.path("output","flow.and.cbc","covid_flu.cytek.36c.freq.as.prop.of.Live.RDS"))
+cytek.36c.populations <- colnames(cytek.36c.freq)[grep("Live",colnames(cytek.36c.freq)):ncol(cytek.36c.freq)]
+cytek.pb.freq <- readRDS(file.path("output","flow.and.cbc","covid_flu.cytek.pb.freq.as.prop.of.Lymphocytes.RDS"))
+cytek.pb.populations <- colnames(cytek.pb.freq)[grep("Lymphocytes",colnames(cytek.pb.freq)):ncol(cytek.pb.freq)]
+
+# gene signatures
+gene.signature.gmt <- readRDS(file.path("data","gene.signatures.gmt.RDS"))
+gene.signature.list <- aggregate(gene.signature.gmt$gene,list(gene.signature.gmt$ont),paste0)
+names(gene.signature.list$x) <- make.names(gene.signature.list$Group.1)
+gene.signature.list <- gene.signature.list$x
+
+```
+
+#### Overlap of subjects
+Only include subjects under 65 y.o.
+```{r overlap}
+d1.ifng.expr.signature.mean.under65 <- subset(ifng.expr.signature.mean,visit == "Day 1" & age < 65)
+d1.olink.sample.info.mean.under65 <- subset(olink.sample.info.mean,visit == "Day 1" & age < 65)
+d0.cytek.36c.freq.under65 <- subset(cytek.36c.freq,visit == "Day 0" & age < 65)
+
+gplots::venn(list(RNA=d1.ifng.expr.signature.mean.under65$alt.subject.id,
+                  OLINK=d1.olink.sample.info.mean.under65$alt.subject.id,
+                  FLOW=d0.cytek.36c.freq.under65$alt.subject.id))
+title("Overlap of subjects")
+
+table(d0.cytek.36c.freq.under65$group,d0.cytek.36c.freq.under65$sex)
+```
+
+#### Correlation of D1 IFNg FC with D7 plasmablast gene signature
+Using Monaco Plasmablasts signature
+```{r corr.pb.sig,fig.cap="ED Fig. 3d (left)"}
+pb.geneset.name <- "Monaco_Plasmablasts_signature"
+demo.params <- c("alt.subject.id","visit","sex","group","age","race","flu.vax.count.10yr","covid.diagnosis.start.date.to.sample.drawn")
+
+# calculate module scores
+normalized.expr.batch.effect.filtered <- assays(normalized.rna.data)$seqRUV.norm.count
+rownames(normalized.expr.batch.effect.filtered) <- rowData(normalized.rna.data)[rownames(normalized.expr.batch.effect.filtered),]$symbol
+sample.signature.scores <- GSVA::gsva(normalized.expr.batch.effect.filtered,gene.signature.list[pb.geneset.name],parallel.sz=1,min.sz=5)
+
+pb.expr.signature <- as.data.frame(cbind(colData(normalized.rna.data)[,demo.params],t(sample.signature.scores)))
+pb.expr.signature.fc <- calculate.fold.change(t(pb.expr.signature[,c(pb.geneset.name,"flu.vax.count.10yr")]),
+                                                pb.expr.signature,"Day 0")
+pb.expr.signature[,paste0("fc.",pb.geneset.name)] <- pb.expr.signature.fc$fc[pb.geneset.name,rownames(pb.expr.signature)]
+d7.pb.expr.signature.mean.under65 <- as.data.frame(subset(pb.expr.signature,visit == "Day 7" & age < 65) %>% group_by(alt.subject.id) %>%
+  summarise_at(.vars=paste0("fc.",pb.geneset.name),.funs = mean))
+
+# merge with IFNG sig.
+d1.ifng.vs.d7.pb.fc <- merge(d1.ifng.expr.signature.mean.under65,d7.pb.expr.signature.mean.under65,by="alt.subject.id",suf=c(".D1",".D7"))
+ggplot(d1.ifng.vs.d7.pb.fc,aes_string("fc.HALLMARK_INTERFERON_GAMMA_RESPONSE",paste0("fc.",pb.geneset.name))) + 
+  geom_point(alpha=.5,size=2) + geom_smooth(method="lm",se = F) + 
+  xlab("D1 - D0 INTERFERON_GAMMA_RESPONSE\nmodule score") + ylab("D7 - D0 plasmablast\nmodule score") +
+  theme_bw() + stat_cor(method="spearman",cor.coef.name = "rho",label.y.npc = "bottom",color="darkgreen") + theme(aspect.ratio = 1)
+ggsave(file.path(figure.folder,"ED.Fig3d_left.pdf"),height=3,width=3)
+```
+
+#### Correlation of D1 IFNg FC with D7 plasmablast freq.
+```{r corr.pb.freq,fig.cap="ED Fig. 3d (right)"}
+pb.flu.params <- grep("H3[+-]|HA+",cytek.pb.populations,value=T)
+pop.of.interest <- pb.flu.params[5]
+
+# re-normalize as fraction of CD19+ B cells
+cytek.pb.freq[,cytek.pb.populations] <- sweep(cytek.pb.freq[,cytek.pb.populations],1,cytek.pb.freq$`CD19+`,"/")
+# D7-D0 plasmablast
+rownames(cytek.pb.freq) <- paste0(cytek.pb.freq$alt.subject.id,".",cytek.pb.freq$visit)
+flu.specific.pb.change <- calculate.fold.change(t(cytek.pb.freq[,pb.flu.params]),cytek.pb.freq,c("Day 0"))
+flu.specific.pb.change <- as.data.frame(t(flu.specific.pb.change$fc[,grep("Day 7$",colnames(flu.specific.pb.change$fc))]))
+rownames(flu.specific.pb.change) <- gsub(".Day 7","",rownames(flu.specific.pb.change))
+
+# merge with IFNG sig.
+d1.ifng.vs.d7.pb.fc <- merge(d1.ifng.expr.signature.mean.under65,flu.specific.pb.change,by.x="alt.subject.id",by.y="row.names",suf=c(".D1",".D7"))
+ggplot(d1.ifng.vs.d7.pb.fc,aes(fc.HALLMARK_INTERFERON_GAMMA_RESPONSE,log2(`All HA+(CD20lowCD21low PB)`))) + 
+  geom_point(alpha=.5,size=2) + geom_smooth(method="lm",se = F) + 
+  xlab("D1 - D0 INTERFERON_GAMMA_RESPONSE\nmodule score") + ylab("log2 D7 - D0\nFlu-specific PBs") +
+  theme_bw() + stat_cor(method="spearman",cor.coef.name = "rho",label.y.npc = "bottom",color="darkgreen") + theme(aspect.ratio = 1)
+ggsave(file.path(figure.folder,"ED.Fig3d_right.pdf"),height=3,width=3)
+```
+
+#### Correlation of D1 IFNg FC with D0 early EM-like CD8+ cell freq.
+```{r corr.cd8.em,fig.cap=c("ED Fig. 4a","ED Fig. 4b","Supp Fig. 5a","Supp Fig. 5b")}
+pop.of.interest <- c("early effector-like CD8+"="Early Like Effector CD8+")
+
+# merge the IFNg gene signature and protein
+ifng.sig.and.protein <- merge(d1.olink.sample.info.mean.under65,d1.ifng.expr.signature.mean.under65,by = demo.params,all=T)
+# merge with D0 cell frequencies
+cytek.36c.freq.w.ifn <- merge(ifng.sig.and.protein,d0.cytek.36c.freq.under65,by="alt.subject.id",suffix=c("",".D0"))
+
+# re-normalize 36c frequency as fraction of lymphocytes
+cytek.36c.freq.w.ifn$log2.freq <- log2(cytek.36c.freq.w.ifn[,pop.of.interest]/cytek.36c.freq.w.ifn[,"Lymphocytes"])
+
+parameter.scatter.plot(subset(cytek.36c.freq.w.ifn,group == "COVR"),param1 = "log2.freq","fc.IFN.gamma.protein") +
+  ylab(paste0("D1 - D0 IFNg normalized expression")) + xlab(paste0("D0 ",pop.of.interest)) +
+  ylim(NA,4.75) + facet_grid(sex~group)
+ggsave(file.path(figure.folder,"ED.Fig4a.pdf"),width=3.5,height=4)
+
+parameter.scatter.plot(subset(cytek.36c.freq.w.ifn,group == "COVR"),param1 = "log2.freq","fc.HALLMARK_INTERFERON_GAMMA_RESPONSE") +
+  ylab(paste0("HALLMARK INTERFERON GAMMA RESPONSE\nD1 - D0 module scores")) + xlab(paste0("D0 ",pop.of.interest)) + 
+  ylim(NA,1.25) + facet_grid(sex~group)
+ggsave(file.path(figure.folder,"ED.Fig4b.pdf"),width=3.5,height=4)
+
+parameter.scatter.plot(subset(cytek.36c.freq.w.ifn,group == "HC"),param1 = "log2.freq","fc.IFN.gamma.protein") +
+  ylab(paste0("D1 - D0 IFNg normalized expression")) + xlab(paste0("D0 ",pop.of.interest)) +
+  ylim(NA,4.75) + facet_grid(sex~group)
+ggsave(file.path(figure.folder,"Supp.Fig5a.pdf"),width=3.5,height=4)
+
+parameter.scatter.plot(subset(cytek.36c.freq.w.ifn,group == "HC"),param1 = "log2.freq","fc.HALLMARK_INTERFERON_GAMMA_RESPONSE") +
+  ylab(paste0("HALLMARK INTERFERON GAMMA RESPONSE\nD1 - D0 module scores")) + xlab(paste0("D0 ",pop.of.interest)) + 
+  ylim(NA,1.25) + facet_grid(sex~group)
+ggsave(file.path(figure.folder,"Supp.Fig5b.pdf"),width=3.5,height=4)
+
+```
+
+
+
+#### Session Info
+```{r}
+sessionInfo()
+```

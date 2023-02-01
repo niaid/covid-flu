@@ -1,0 +1,157 @@
+---
+title: "mono_reversal_gene_heatmaps"
+output: html_document
+date: "2023-01-07"
+---
+
+```{r setup, message=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(Biobase)
+library(limma)
+library(tidyverse)
+library(ComplexHeatmap)
+library(pheatmap)
+library(circlize)
+library(RColorBrewer)
+library(reshape2)
+```
+
+## Plot reversal genes after flu vaccination in mono
+Mono BTM-M4.0/M11.0 innate immune receptor signature genes that were "reset/reversed" after flu vaccination  
+using reversal LE genes from single cell pseudobulk dream model  
+input is output from filtered and normalized pseudobulk objects  
+**Generate Figure 4d, Extended Data Figure 5c heatmaps**  
+Seurat object needs to be downloaded and put in data/ folder, pseudobulk lists generated using the pooling functions  
+
+```{r input}
+# Generate pseudobulk lists and set parameters for pbulk input/output
+source("utils/heatmap_mono.R")
+DGE_IN_PATH <- "output/CITE-seq/covid_flu.CITEseq.pseudobulk.gene.expr.filtered.RDS"
+
+# input LE sets from dream model
+selected.reset.M4.M11 <- readRDS("data/LE_sets/mono.LE.and.reset.genesets.RDS")
+
+pbulk_list <- readRDS(DGE_IN_PATH)
+
+# parse and filter data to show interested timepoints/groups
+parse_meta <- function(dge){
+  filter <- colnames(dge$counts)[dge$samples$group %in% c("HC","COVR")]
+  dge <- dge[,filter]
+  dge$samples$Timepoint.sex.group <- paste(dge$samples$visit, 
+                                           dge$samples$sex, 
+                                           dge$samples$group, sep = ".")
+  dge$samples$Timepoint.group <- paste(dge$samples$visit, 
+                                       dge$samples$group, sep = ".")
+  dge$samples$sample_id <- str_extract(rownames(dge$samples), "(HC|COVR).+D\\d+")
+  dge <- dge
+}
+
+pbulk_list <- lapply(pbulk_list, parse_meta)
+
+eset_list_group <- lapply(pbulk_list, function(dge){
+  filter <- colnames(dge$counts)[dge$samples$Timepoint.group %in% c("Day 0.HC","Day 0.COVR","Day 1.HC","Day 1.COVR","Day 28.HC","Day 28.COVR")]
+  dge$samples$Timepoint.group <- factor(dge$samples$Timepoint.group, levels = c("Day 0.HC","Day 0.COVR","Day 1.HC","Day 1.COVR","Day 28.HC","Day 28.COVR"))
+  dge$samples <- dge$samples[filter,]
+  dge$counts  <- dge$counts[,filter]
+  dge$normalizedExpr  <- dge$normalizedExpr[,filter]
+  dge <- dge
+})
+```
+  
+  
+### Heatmap for classical monocytes  
+**Fig 4d**  
+```{r heatmap_mc, fig.width=11, fig.height=3}
+Mono_Classical <- eset_list_group$Mono_Classical
+# calculate mean for some duplicated samples
+Mono_Classical_exprs <- reshape2::melt(Mono_Classical$normalizedExpr) %>%
+  mutate(sample_id = str_extract(Var2, "(HC|COVR).+D\\d+")) %>% 
+  group_by(Var1, sample_id) %>%
+  dplyr::summarise(exprs.mean = mean(value)) %>%
+  reshape2::dcast(Var1 ~ sample_id, value.var = "exprs.mean") %>%
+  column_to_rownames("Var1")
+Mono_Classical$normalizedExpr <- Mono_Classical_exprs
+Mono_Classical$samples <- distinct(Mono_Classical$samples, sample_id, .keep_all = TRUE)
+
+Mono_Classical.f <- intersect(rownames(Mono_Classical$normalizedExpr), selected.reset.M4.M11$Mono_Classical$CITEseq.stable.reset.genes.LE.Union.genesets$Female)
+Mono_Classical.m <- intersect(rownames(Mono_Classical$normalizedExpr), selected.reset.M4.M11$Mono_Classical$CITEseq.stable.reset.genes.LE.Union.genesets$Male)
+
+meta.f <- Mono_Classical$samples %>% 
+  filter(sex == "Female") %>%
+  dplyr::arrange(Timepoint.group)
+meta.m <- Mono_Classical$samples %>% 
+  filter(sex == "Male") %>%
+  dplyr::arrange(Timepoint.group)
+
+Mono_Classical_mtx_f <- Mono_Classical$normalizedExpr[Mono_Classical.f, meta.f$sample_id]
+Mono_Classical_mtx_m <- Mono_Classical$normalizedExpr[Mono_Classical.m, meta.m$sample_id]
+
+
+# label interested genes GO:PRRset, GO:Myeloid leukocyte activation
+labelset <- c("TLR2","TLR8","TLR4","CLEC4E","PTAFR","NOD2",
+              "TYROBP","LILRB3","LILRA2","FCAR","HK3","BST1","SIGLEC9","FPR2","FES","GCA","PRKCD","PYGL","CCR1","GRN","PTAFR","MNDA","ALOX5","FGL2")
+
+
+print("Female Mono_Classical heatmap")
+# pdf("pbulk_DE_0405/plots/Mono_Classical_subjecthm_female.fig4d.pdf", width = 8, height = 3.2)
+subject.hm.fm(exprs_mtx=Mono_Classical_mtx_f, meta=meta.f, celltype="Mono_Classical", module="Female", labelset=labelset)
+# dev.off()
+
+print("Male Mono_Classical heatmap")
+# pdf("pbulk_DE_0405/plots/Mono_Classical_subjecthm_male.fig4d.pdf", width = 8, height = 2.6)
+subject.hm.fm(exprs_mtx=Mono_Classical_mtx_m, meta=meta.m, celltype="Mono_Classical", module="Male", labelset=labelset)
+# dev.off()
+```
+
+
+### Heatmap for Non-classical monocytes  
+**Extended Data Fig 5c**  
+```{r heatmap_mnc, fig.width=10, fig.height=2.8}
+Mono_NonClassical <- eset_list_group$Mono_NonClassical
+# calculate mean for some duplicated samples
+Mono_NonClassical_exprs <- reshape2::melt(Mono_NonClassical$normalizedExpr) %>%
+  mutate(sample_id = str_extract(Var2, "(HC|COVR).+D\\d+")) %>% 
+  group_by(Var1, sample_id) %>%
+  dplyr::summarise(exprs.mean = mean(value)) %>%
+  reshape2::dcast(Var1 ~ sample_id, value.var = "exprs.mean") %>%
+  column_to_rownames("Var1")
+Mono_NonClassical$normalizedExpr <- Mono_NonClassical_exprs
+Mono_NonClassical$samples <- distinct(Mono_NonClassical$samples, sample_id, .keep_all = TRUE)
+
+Mono_NonClassical.f <- intersect(rownames(Mono_NonClassical$normalizedExpr), selected.reset.M4.M11$Mono_NonClassical$CITEseq.stable.reset.genes.LE.Union.genesets$Female)
+Mono_NonClassical.m <- intersect(rownames(Mono_NonClassical$normalizedExpr), selected.reset.M4.M11$Mono_NonClassical$CITEseq.stable.reset.genes.LE.Union.genesets$Male)
+
+meta.f <- Mono_NonClassical$samples %>% 
+  filter(sex == "Female") %>%
+  dplyr::arrange(Timepoint.group)
+meta.m <- Mono_NonClassical$samples %>% 
+  filter(sex == "Male") %>%
+  dplyr::arrange(Timepoint.group)
+
+Mono_NonClassical_mtx_f <- Mono_NonClassical$normalizedExpr[Mono_NonClassical.f, meta.f$sample_id]
+Mono_NonClassical_mtx_m <- Mono_NonClassical$normalizedExpr[Mono_NonClassical.m, meta.m$sample_id]
+
+
+# label GO:PRR set,GO:immune receptor activity, GO: myeloid leukocyte activation
+labelset <- c("TLR4","TLR2","CLEC4E", 
+              "LILRB3", "LILRA2", "FCER1G", "FPR1", "FPR2", "CCR1",
+              "S100A8", "S100A9","S100A11","FCAR","HK3","LAT2","FES",
+              "GCA","CCR1","GRN","ITGAM","ITGAX","MNDA","HSPA6","ALOX5")
+
+print("Female Mono_NonClassical heatmap")
+# pdf("pbulk_DE_0405/plots/Mono_NonClassical_subjecthm_female.EDfig5c.pdf", width = 8, height = 3.2)
+subject.hm.fm(exprs_mtx=Mono_NonClassical_mtx_f, meta=meta.f, celltype="Mono_NonClassical", module="Female", labelset=labelset)
+# dev.off()
+
+print("Male Mono_NonClassical heatmap")
+# pdf("pbulk_DE_0405/plots/Mono_NonClassical_subjecthm_male.EDfig5c.pdf", width = 8, height = 2.6)
+subject.hm.fm(exprs_mtx=Mono_NonClassical_mtx_m, meta=meta.m, celltype="Mono_NonClassical", module="Male", labelset=labelset)
+# dev.off()
+```
+
+
+```{r}
+sI <- sessionInfo()
+utils:::print.sessionInfo(sI[-c(10,11)])
+```
+

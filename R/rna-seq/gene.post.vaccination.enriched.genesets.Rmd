@@ -1,0 +1,100 @@
+---
+title: "COVID Flu: Whole Blood RNA-Seq Days 1 and 7 Enriched Genesets"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, message=F}
+library(knitr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(SummarizedExperiment)
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+figure.folder <- "figures"
+dir.create(figure.folder)
+output.folder <- file.path("output","rna-seq")
+dir.create(output.folder)
+output.prefix <- "bulk.rna."
+
+# GSEA results
+timepoint.gsea.res <- read.csv(file.path(output.folder,"bulk.rna.vaccine.response.gsea.wo.TSD.genes.under65.csv"))
+contrast.labeller = c(COVR.f="COVR F\nvs.\nHC F",COVR.m="COVR M\nvs.\nHC M",COVR.v.HC="COVR\nv.\nHC",sex.diff="Sex\nDifference")
+```
+
+### Post-vaccination shift 
+Identify genesets enriched when comparing between groups at specific timepoints as well as 
+when comparing to baseline difference (i.e. exhibit sig. changes in the differences)
+```{r post.vaccination,fig.cap="ED Fig. 3a",fig.width=4.5,fig.height=7}
+contrasts <- grep("baseline",unique(timepoint.gsea.res$contrast),invert = T,value = T)
+timepoint.unique.genesets <- data.frame()
+pval.threshold <- 0.05
+for (i in contrasts) {
+  sex.diff.timepoint.gsea.res.diff.baseline <- merge(subset(timepoint.gsea.res,contrast == i),
+                                                     subset(timepoint.gsea.res,contrast == paste0(i,".sub.baseline")),
+                                                     by=c("visit","parameter","ont"),suf=c("",".sub.baseline"))
+  # retain those that are sig. at each timepoint compared to healthy counterpart and also sig. diff from baseline
+  sex.diff.timepoint.gsea.res.diff.baseline <- 
+    subset(sex.diff.timepoint.gsea.res.diff.baseline,adj.P.Val < pval.threshold & adj.P.Val.sub.baseline <= pval.threshold)
+  table(sex.diff.timepoint.gsea.res.diff.baseline$visit)
+  sex.diff.timepoint.gsea.res.diff.baseline$num.edge.genes <- 
+    sapply(sex.diff.timepoint.gsea.res.diff.baseline$core_enrichment,function(x){length(unlist(strsplit(x,"/")))})
+  sex.diff.timepoint.gsea.res.diff.baseline$pct.edge.genes <-
+    sex.diff.timepoint.gsea.res.diff.baseline$num.edge.genes/sex.diff.timepoint.gsea.res.diff.baseline$setSize
+  
+  timepoint.unique.genesets <- rbind(timepoint.unique.genesets,sex.diff.timepoint.gsea.res.diff.baseline)
+}
+timepoint.unique.genesets$parameter <- gsub("_"," ",timepoint.unique.genesets$parameter)
+
+# show the shift of selected genesets
+# group genesets
+timepoint.unique.genesets$geneset.class <- "Others"
+timepoint.unique.genesets[grep("T cell|TCR",timepoint.unique.genesets$parameter),]$geneset.class <- " T Cells"
+timepoint.unique.genesets[grep("Monocyte|myeloid",
+                              timepoint.unique.genesets$parameter,ignore.case = T),]$geneset.class <- " Monocytes"
+timepoint.unique.genesets[grep("DC|dendritic",
+                              timepoint.unique.genesets$parameter,ignore.case = T),]$geneset.class <- " Innate\nImmune\nActivation"
+timepoint.unique.genesets[grep("cell cycle|MYC|G2M|E2F",
+                              timepoint.unique.genesets$parameter,ignore.case = T),]$geneset.class <- " Cell Cycle"
+timepoint.unique.genesets[grep("metabolism|phosphorylation|M139|MTORC1|Adipogenesis|GLYCOLYSIS",
+                              timepoint.unique.genesets$parameter,ignore.case = T),]$geneset.class <- " Metabolic\nProcesses"
+timepoint.unique.genesets[grep("neutrophils",timepoint.unique.genesets$parameter,ignore.case = T),]$geneset.class <- " Neutrophils"
+timepoint.unique.genesets[grep("plasma|B cell|B naive",
+                              timepoint.unique.genesets$parameter,ignore.case = T),]$geneset.class <- " B Cells"
+timepoint.unique.genesets[grep("interferon|IFN|ALLOGRAFT",
+                              timepoint.unique.genesets$parameter,ignore.case = T),]$geneset.class <- " IFN Signaling"
+timepoint.unique.genesets[grep("TLR|inflammatory|activation|M111",
+                              timepoint.unique.genesets$parameter,ignore.case = T),]$geneset.class <- " Innate\nImmune\nActivation"
+timepoint.unique.genesets[grep("neutrophil",
+                              timepoint.unique.genesets$parameter,ignore.case = T),]$geneset.class <- " Neutrophils"
+timepoint.unique.genesets[grep("NK",
+                              timepoint.unique.genesets$parameter,ignore.case = T),]$geneset.class <- " NK Cells"
+
+timepoint.unique.genesets$contrast.term <- contrast.labeller[timepoint.unique.genesets$contrast]
+ggplot(subset(timepoint.unique.genesets,visit %in% c("D1","D7") & contrast != "COVR.v.HC" & num.edge.genes > 10),aes(visit,parameter)) + 
+  geom_point(aes(fill=NES.sub.baseline,pch=NES.sub.baseline > 0),color="black",size=4) + 
+  scale_shape_manual(values=c(25,24)) +
+  scale_fill_gradientn(colors=colorRampPalette(c("#0066FF","#003399","#000066","black","yellow4","yellow"))(100),limits=c(-3.5,3.5)) + 
+  ylab("Geneset") + xlab("Visit") + ggtitle("Shifts from baseline differences in whole blood") +
+  facet_grid(geneset.class~contrast.term,scales = "free",space = "free",switch="y") + 
+  theme_bw() + scale_y_discrete(position = "right") +
+  theme(axis.text.y = element_text(size=4),legend.position = "bottom",legend.box = "vertical",
+        strip.background = element_rect(fill="white",color="white",size=6),strip.text.y.left = element_text(angle=0,hjust = 1,size=8))
+ggsave(file.path(figure.folder,"ED.Fig3a.pdf"),width=5.5,height=9)
+
+```
+
+### Session Info
+```{r session}
+sessionInfo()
+```

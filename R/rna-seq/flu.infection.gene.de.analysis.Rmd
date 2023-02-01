@@ -1,0 +1,187 @@
+---
+title: "COVID Flu: Validation using an independent respiratory viral infection study"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+Compare spring timepoints (> 21 days after infection) to baseline (pre-infection) to see if there are any sex differences
+
+
+To run this script, please first download the series matrix file (https://ftp.ncbi.nlm.nih.gov/geo/series/GSE68nnn/GSE68310/matrix/GSE68310_series_matrix.txt.gz) and
+GSE68310_non-normalized.txt.gz (https://ftp.ncbi.nlm.nih.gov/geo/series/GSE68nnn/GSE68310/suppl/GSE68310_non-normalized.txt.gz) from GEO and place the unpacked txt files in the data/GSE68310 folder.
+```{r setup, message=F}
+library(knitr)
+library(edgeR)
+library(dplyr)
+library(clusterProfiler)
+library(SummarizedExperiment)
+library(org.Hs.eg.db)
+library(variancePartition)
+library(BiocParallel)
+library(doParallel)
+param = SnowParam(32,"SOCK",progressbar = F)
+register(param)
+registerDoParallel()
+
+source('R/utils/dream.models.R')
+loadLibraries()
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","rna-seq")
+dir.create(output.folder)
+output.prefix <- "flu.infection."
+figure.folder <- "figures"
+dir.create(figure.folder)
+```
+
+### Import data
+```{r import}
+# series matrix
+study.data <- GEOquery::getGEO(filename=file.path("data","GSE68310","GSE68310_series_matrix.txt"))
+sample.info <- phenoData(study.data)@data
+colnames(sample.info) <- make.names(gsub(":ch1","",colnames(sample.info)))
+table(sample.info[,c("time.point","infection")])
+subject.info <- read.csv(file.path("data","GSE68310","GSE68310_SubjectPhenotypes1.txt"),sep="\t")
+sample.info <- merge(sample.info,subject.info,by.x=c("subject.id"),by.y=c("SUBJECT_ID"))
+gene.info <- featureData(study.data)@data
+gene.info[,c("Updated_Entrez_Gene_ID","Updated_Symbol")] <- 
+  select(org.Hs.eg.db,keys = as.character(gene.info$Entrez_Gene_ID),columns=c("ENTREZID","SYMBOL"),keytype="ENTREZID")
+
+# gene signatures
+gene.signatures.gmt <- readRDS(file.path("data","gene.signatures.gmt.RDS"))
+
+# IIR signature 
+mono.signatures <- readRDS(file.path("output","CITE-seq","mono.LE.and.reset.genesets.RDS"))
+
+# cite-seq pseudobulk data (filtered)
+cite_pseudobulk_list <- readRDS(file.path("output","CITE-seq","covid_flu.CITEseq.pseudobulk.gene.expr.filtered.RDS"))
+```
+
+### Filtering
+Only baseline and spring samples for subjects with flu A infection and remove probes without gene symbols or lowly expressed
+```{r filtering}
+sample.info <- subset(sample.info,time.point %in% c("Baseline","Spring") & 
+                        ((infection == "influenza A virus" & Enrollment_year == 2010) | (infection == "influenza A virus" & Enrollment_year == 2009)))
+table(sample.info$Enrollment_year,sample.info$Gender)
+dim(sample.info)
+
+# genes with symbols
+gene.info <- subset(gene.info,!is.na(Updated_Symbol))
+
+# remove lowly expressed genes
+geneExpr <- assayData(study.data)$exprs
+max.geneExpr <- rowMax(geneExpr)
+gene.info <- subset(gene.info,ID %in% rownames(geneExpr)[log2(max.geneExpr) > 2.95])
+
+geneExpr <- geneExpr[gene.info$ID,sample.info$geo_accession]
+geneExpr.mean <- aggregate.data.frame(geneExpr,list(gene.info$Updated_Symbol),mean)
+rownames(geneExpr.mean) <- geneExpr.mean$Group.1
+geneExpr.mean <- geneExpr.mean[,-1]
+```
+
+### Model Setup
+Run independently for each enrollment year
+Model: ~ time.point.sex + Age + num_flu_vaccination + (1|subject.id)
+```{r model.setup}
+sample.info$num_flu_vaccination <- rowSums(sample.info[,grep("Prior_receipt_of_seasonal_flu_vaccine",colnames(sample.info))] == "YES",na.rm = T)
+sample.info$time.point.sex <- paste0(sample.info$time.point,".",sample.info$Gender)
+sample.info$HAI_H1N1_Spring_to_Baseline_FC <- log2(sample.info$HAI_H1N1Spring) - log2(sample.info$HAI_H1N1Baseline)
+sample.info$max.temp <- as.numeric(gsub("<100","99.9",sample.info$Maximum_oral_temperature_on_first_day_of_illness_in_Fahrenheit))
+sample.info$fever.grade <- "None"
+sample.info[sample.info$max.temp >= 100.4,"fever.grade"] <- "Low"
+sample.info[sample.info$max.temp >= 103,"fever.grade"] <- "High"
+rownames(sample.info) <- sample.info$geo_accession
+
+table(subset(sample.info,time.point == "Spring")[,c("fever.grade","gender","Enrollment_year")])
+```
+
+### Gene DE Analysis
+```{r baseline.model}
+model <- ~ 0 + time.point.sex + Age + num_flu_vaccination + fever.grade + (1|subject.id)
+# run dream
+validation.model.de.res <- data.frame()
+for (year in unique(sample.info$Enrollment_year)) {
+  include.samples <- subset(sample.info,Enrollment_year == year)
+  
+  timepoint.f.diff <- getContrast(log2(geneExpr.mean[,rownames(include.samples)]), model, include.samples,
+                           c(paste0("time.point.sexSpring.F"),paste0("time.point.sexBaseline.F")))
+  timepoint.m.diff <- getContrast(log2(geneExpr.mean[,rownames(include.samples)]), model, include.samples,
+                           c(paste0("time.point.sexSpring.M"),paste0("time.point.sexBaseline.M")))
+  timepoint.sex.diff <- timepoint.m.diff - timepoint.f.diff
+  contrast <- cbind(timepoint.f.diff,timepoint.m.diff,timepoint.sex.diff)
+  
+  validation.model.fit <- dream(log2(geneExpr.mean[,rownames(include.samples)]),model,include.samples,L=contrast,suppressWarnings = T)
+  validation.model.de.res <- rbind(validation.model.de.res,cbind(cohort=year,model.term.statistics(validation.model.fit,colnames(contrast))))
+}
+validation.model.de.res$gene.symbol <- validation.model.de.res$parameter
+write.csv(validation.model.de.res,file.path(output.folder,paste0(output.prefix,"pre.and.post.difference.gene.csv")),row.names = F)
+
+# consistency between enrollment years
+gene.consistency.by.z.std <- reshape2::dcast(validation.model.de.res,term + parameter ~ cohort,value.var = "z.std")
+gene.consistency.by.pval <- reshape2::dcast(validation.model.de.res,term + parameter ~ cohort,value.var = "P.Value")
+pval.max <- apply(gene.consistency.by.pval[,3:4],1,max)
+gene.consistency.by.pval[,paste0("signed.log10.",colnames(gene.consistency.by.pval[,3:4]))] <- 
+  -log10(gene.consistency.by.pval[,3:4]) * gene.consistency.by.z.std[,3:4]
+```
+
+ED Fig. 2b
+```{r plot}
+ggplot(gene.consistency.by.z.std,aes(`2009`,`2010`)) + geom_point(alpha=0.2) + geom_density_2d_filled(alpha=0.5,breaks=seq(0.02,0.12,by=0.01)) +
+  facet_grid(~term) + stat_cor(method="spearman") + theme_bw() + 
+  ylab("Post- vs. pre-infection in 2010 cohort") + xlab("Post- vs. pre-infection in 2009 cohort") +
+  ggtitle("Correlation of post- vs. pre-inection gene expression changes\nbetween 2009 and 2010 influenza seasons")
+ggsave(file.path(figure.folder,"ED.Fig2b.pdf"),width=7,height=3)
+```
+
+### Gene DE comparison with COVID-Flu study
+```{r compare.gene,fig.cap=c("","ED Fig. 2c")}
+covid.flu.model.de.res <- read.csv(file.path(output.folder,"bulk.rna.baseline.gene.under65.csv"))
+
+# overlap of genes
+gplots::venn(list(validation=unique(validation.model.de.res$gene.symbol),covid.flu=unique(covid.flu.model.de.res$gene.symbol)))
+
+# GSEA of Validation DE genes
+sig.validation.genes <- subset(validation.model.de.res, P.Value < 0.05)
+sig.validation.genes$direction <- ifelse(sig.validation.genes$logFC > 0,"UP","DOWN")
+table(sig.validation.genes[,c("direction","term","cohort")])
+
+validation.genesets <- as.data.frame(sig.validation.genes %>% group_by(cohort,term,direction) %>% summarise(gene=c(gene.symbol)))
+validation.genesets$cohort <- as.character(validation.genesets$cohort)
+intersect.validation.genesets <- validation.genesets %>% group_by(term,direction) %>% summarise(gene=names(which(table(gene) > 1)))
+intersect.validation.genesets$cohort <- "intersect"
+validation.genesets <- bind_rows(validation.genesets,intersect.validation.genesets)
+validation.genesets$ont <- apply(validation.genesets[,1:3],1,paste0,collapse="_")
+
+validation.genesets$source <- "Validation Study"
+gene.de.consistency <- run.gsea(subset(covid.flu.model.de.res,term == "COVR.male.v.female"),
+                                validation.genesets[,c("ont","gene","source")],maxSize = 1300,
+                                plot.genesets = c("intersect_timepoint.m.diff_UP"))
+ggsave(file.path(figure.folder,"ED.Fig2c.pdf"),width=4,height=3)
+write.csv(gene.de.consistency,file.path(output.folder,paste0(output.prefix,"gsea.flu.study.DE.genes.vs.COVR-Flu.csv")),row.names = F)
+```
+
+### Monocyte signature
+Overlap with monocyte IIR signature using over-representation test
+```{r monocyte.signature}
+overlap.res <- enricher(mono.signatures$Monocytes$CITEseq.baseline.LE.Union.genesets$m.and.f.union,
+                  TERM2GENE = rbind(validation.genesets[,c("ont","gene")],
+                                    data.frame(ont="others",gene=unique(setdiff(validation.model.de.res$gene.symbol,validation.genesets$gene)))),
+                  pvalueCutoff = Inf,qvalueCutoff = Inf,minGSSize = NA,maxGSSize = NA,
+                  universe = union(rownames(cite_pseudobulk_list$Mono_Classical$counts),rownames(cite_pseudobulk_list$Mono_NonClassical$counts)))
+
+write.csv(as.data.frame(overlap.res),file.path(output.folder,"infection.de.genes.and.monocyte.sig.overlap.res.csv"),row.names = F)
+```
+
+### Session Info
+```{r session}
+sessionInfo()
+```

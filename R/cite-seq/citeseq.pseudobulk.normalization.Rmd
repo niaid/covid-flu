@@ -1,0 +1,120 @@
+---
+title: "COVID Flu: CITE-seq normalization of pbulk counts"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+Prepare pbulk gene expression data for DE analysis
+```{r setup, message=F}
+library(knitr)
+library(SummarizedExperiment)
+library(limma)
+library(edgeR)
+library(dplyr)
+library(ggplot2)
+library(BiocParallel)
+library(doParallel)
+param = SnowParam(32,"SOCK",progressbar = T)
+register(param)
+registerDoParallel()
+options(future.globals.maxSize = 120 * 1024 ^3)
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","CITE-seq")
+dir.create(output.folder)
+
+pseudobulk_list <- readRDS(file.path("data","covid_flu.CITEseq.pseudobulk.gene.expr.RDS"))
+```
+
+Filtering and normalization of count data, and create a batch-corrected gene expression dataset for visualization purpose
+```{r filtering,out.width="800px"}
+var.threshold <- 1
+pseudobulk_list_normalized <- list()
+pseudobulk_list_filtered <- list()
+for (i in names(pseudobulk_list)) {
+  cat(i,"-\n")
+  eset <- pseudobulk_list[[i]]
+  geneExpr <- eset$counts
+  sample.info <- eset$samples
+  sample.info$sample.id <- paste0(sample.info$alt.subject.id,".",sample.info$visit)
+  
+  # filter out lowly expressed genes
+  cat("Number of genes with no counts across samples:\n")
+  print(table(rowSums(eset$counts==0)==nrow(sample.info)))
+  keep.exprs <- filterByExpr(eset,group = sample.info$visit.overall.group.sex, min.count = 2,min.prop=0.5)
+  cat("Number of genes to keep by expr:",sum(keep.exprs),"\n")
+  eset <- eset[keep.exprs,,keep.lib.sizes = F]
+ 
+  # stage 1: normalize and correct
+  eset <- calcNormFactors(eset)
+  sample.info$visit.overall.group.sex <- ifelse(is.na(sample.info$visit.overall.group.sex),"Control",as.character(sample.info$visit.overall.group.sex))
+  # a model that accommodate the control samples
+  tmp.model <- model.matrix(~ 0 + visit.overall.group.sex,sample.info)
+  vobj <- voom(eset ,design = tmp.model,plot = F)
+  #title("",i)
+  geneExpr <- vobj$E # normalized
+  
+  # PCA using baseline samples before correction
+  baseline.samples <- subset(sample.info,!(visit %in% c("Day 1","Day 28")))
+  baseline.geneExpr <- geneExpr[,rownames(baseline.samples)]
+  baseline.geneExpr.pca <- prcomp(t(baseline.geneExpr),center = T,scale. = T)
+  baseline.samples <- cbind(baseline.samples,baseline.geneExpr.pca$x[rownames(baseline.samples),1:2])
+  print(ggplot(baseline.samples,aes(PC1,PC2)) + geom_point(aes(color=paste0(Batch),shape=alt.subject.id == "Control"),size=2,alpha=0.8) + 
+          ggtitle(paste0("Before correction: ",i)))
+  cat("Before correction:\n")
+  print(car::Anova(lm(PC1 ~ n_barcodes + Batch,baseline.samples)))
+  print(car::Anova(lm(PC2 ~ n_barcodes + Batch,baseline.samples)))
+  
+  # remove batch effect
+  normalized.expr.batch.effect <- removeBatchEffect(geneExpr, batch = eset$samples$Batch, 
+                                                    covariates = eset$samples$n_barcodes,
+                                                    design = tmp.model)
+  geneExpr <- normalized.expr.batch.effect
+  eset$normalizedExpr <- geneExpr
+  pseudobulk_list_normalized[[i]] <- eset
+  
+  # PCA using baseline samples after correction
+  baseline.samples <- subset(sample.info,!(visit %in% c("Day 1","Day 28")))
+  baseline.geneExpr <- geneExpr[,rownames(baseline.samples)]
+  baseline.geneExpr.pca <- prcomp(t(baseline.geneExpr),center = T,scale. = T)
+  baseline.samples <- cbind(baseline.samples,baseline.geneExpr.pca$x[rownames(baseline.samples),1:2])
+  print(ggplot(baseline.samples,aes(PC1,PC2)) + geom_point(aes(color=paste0(Batch),shape=alt.subject.id == "Control"),size=2,alpha=0.8) + 
+          ggtitle(paste0("After correction: ",i)))
+  cat("After correction:\n")
+  print(car::Anova(lm(PC1 ~ n_barcodes + Batch,baseline.samples)))
+  print(car::Anova(lm(PC2 ~ n_barcodes + Batch,baseline.samples)))
+  
+  # stage 2: filter out genes by technical noise by leveraging repeats
+  if (sum(table(sample.info$sample.id) > 1) > 0) {
+    geneExpr.var <- apply(geneExpr,1,var)
+    repeat.geneExpr.var <- data.frame(id=sample.info$sample.id,t(geneExpr)) %>% group_by(id) %>% summarise(across(where(is.numeric),var))
+    repeat.geneExpr.var <- apply(as.data.frame(repeat.geneExpr.var[,-1]),2,mean,na.rm=T)
+    plot(log2(repeat.geneExpr.var+1),log2(geneExpr.var+1),main=i)
+    abline(coef=c(0,1),col="red")
+    keep.var <- geneExpr.var > repeat.geneExpr.var*var.threshold
+    cat("Number of genes to keep by var:",sum(keep.var),"\n")
+    eset <- eset[keep.var,,keep.lib.sizes = F]
+    geneExpr <- geneExpr[keep.var,]
+    eset$normalizedExpr <- geneExpr
+  }
+    
+  pseudobulk_list_filtered[[i]] <- eset
+}
+saveRDS(pseudobulk_list_normalized,file.path(output.folder,paste0("covid_flu.CITEseq.pseudobulk.gene.expr.normalized.RDS")))
+saveRDS(pseudobulk_list_filtered,file.path(output.folder,paste0("covid_flu.CITEseq.pseudobulk.gene.expr.filtered.RDS")))
+```
+
+### Session Info
+```{r session}
+sessionInfo()
+```
+

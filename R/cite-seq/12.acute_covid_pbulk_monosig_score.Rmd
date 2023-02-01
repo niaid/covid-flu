@@ -1,0 +1,185 @@
+---
+title: "acute_covid_pbulk_monosig_score"
+output: html_document
+date: "2023-01-09"
+---
+
+```{r setup, message=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(edgeR)
+library(GSVA)
+library(tidyverse)
+library(Biobase)
+library(reshape2)
+library(ggpubr)
+library(DESeq2)
+```
+
+## Get GSVA score of the filtered pseudobulk objects for acute COVID data
+acute COVID data from Liu et al, Cell, 2021  
+using monocyte repressed BTM-M4.0/M11.0 innate immune receptor signature in Figure 1  
+Mono baseline (D0, covid-healthy) BTM-M4.0/M11.0 innate immune receptor signature  
+Input is output from filtered and normalized pseudobulk objects of acute COVID data GEO: GSE161918  
+Download the Seurat object from GSE161918
+And put it in the data/other_datasets/acute_covid/ folder
+Generate pseudobulk lists as reported in https://github.com/niaid/covid19-time-resolved 
+**Generate Extended Data Figure 1i boxplot**  
+```{r input}
+# Generate pseudobulk lists as reported in https://github.com/niaid/covid19-time-resolved
+DGELISTS_IN_PATH <- c("data/other_datasets/acute_covid/pseudobulk_dgelists_normalized/Unsorted-WCTcoursecelltype.rds")
+OUT_DIR <- "output/pbulk/gsva/"
+dir.create(OUT_DIR, recursive = TRUE)
+
+# input LE sets from dream model
+selected.reset.M4.M11 <- readRDS("data/LE_sets/mono.LE.and.reset.genesets.RDS")
+pbulk_list <- readRDS(DGELISTS_IN_PATH)
+
+# list of expression data by cell type
+eset_list <- lapply(pbulk_list, function(dge){
+  mat <- DESeq2::varianceStabilizingTransformation(dge$counts)
+  meta <- dge$samples
+  ExpressionSet(assayData = mat, phenoData = AnnotatedDataFrame(meta))
+})
+eset_list <- unlist(eset_list)
+# remove technical control CHI014
+eset_list <- lapply(eset_list, function(dge){
+  dge <- dge[, dge$Donor != "CHI014"]
+  dge$sample_id <- paste(dge$Donor, dge$Timepoint, sep = "_")
+  return(dge)
+})
+sapply(eset_list, ncol)
+
+eset_list_mono <- eset_list[c("Mono_Classical", "Mono_NonClassical")]
+```
+  
+Calculate module scores  
+```{r cal_score}
+scores_list <- lapply(1:length(eset_list_mono), function(eset){
+  cat(names(eset_list_mono)[eset],"\n")
+  celltype.gsea.res <- selected.reset.M4.M11[[names(eset_list_mono)[eset]]]$CITEseq.baseline.LE.Union.genesets
+  # if (nrow(celltype.gsea.res) > 0) {
+  module.scores <- gsva(expr = eset_list_mono[[eset]], gset.idx.list = celltype.gsea.res, method = "gsva", parallel.sz = 16, min.sz = 5)
+  return(cbind(reshape2::melt(exprs(module.scores)),celltype= names(eset_list_mono)[eset]))
+  # }
+})
+
+module.scores.df <- do.call("rbind",scores_list)
+colnames(module.scores.df) <- c("geneset","sample","module.score","celltype")
+# add meta data and transform the dataframe into esetlist
+sample_meta <- pbulk_list$Mono_Classical$samples %>% rownames_to_column(var = "sample")
+# add other info
+module.scores.df$geneset_celltype <- paste0(module.scores.df$geneset,"--",module.scores.df$celltype)
+module.scores.df <- left_join(module.scores.df,
+                              sample_meta[,c("sample", "Donor", "Age", "sex", "ever_admitted_to_icu", "Class", "cond_group", "Timepoint", "PC1_cat", "onset_group", "severity.outcome2", "PC1_onset_group", "days_since_onset","PC1")], 
+                              by=c("sample"))
+write.csv(module.scores.df, file.path(OUT_DIR, "module_score_gsva_filtered_samples_genes_df.Mono.M4M11.Brescia.csv"))
+```
+
+  
+Boxplot of module scores  
+Using the limma model to calculate p values given there are multiple samples from individuals  
+Showing the union LEs from male and female module score  
+```{r boxplot, fig.width=8, fig.height=6}
+# module.scores.df <- read.csv(file.path(OUT_DIR, "module_score_gsva_filtered_samples_genes_df.Mono.M4M11.Brescia.csv"), header = TRUE, row.names = 1, stringsAsFactors = FALSE)
+# test to account for the subjects with multiple timepoints -- use the limma model
+source("utils/limma_DE_functions_cell_freq.R")
+module.scores.exprs <- module.scores.df %>%
+  dplyr::mutate(PC1_cat2 = factor(replace(as.character(.$PC1_cat), .$Class == "HC", "HC"), levels = c("HC","PC1_low","PC1_high"))) %>%
+  filter(!is.na(PC1_cat2)) %>%
+  reshape2::dcast(geneset_celltype~sample, value.var = "module.score") %>%
+  column_to_rownames("geneset_celltype")
+
+module.scores.meta <- module.scores.df %>%
+  dplyr::mutate(PC1_cat2 = factor(replace(as.character(.$PC1_cat), .$Class == "HC", "HC"), levels = c("HC","PC1_low","PC1_high"))) %>%
+  filter(!is.na(PC1_cat2)) %>%
+  dplyr::distinct(sample, .keep_all = TRUE) %>%
+  column_to_rownames("sample")
+
+module.scores.meta[,c("geneset","module.score","celltype")] <- NULL
+eset <- ExpressionSet(assayData = as.matrix(module.scores.exprs), phenoData = AnnotatedDataFrame(module.scores.meta))
+FORMULA <- "~0 + PC1_cat2"
+FORMULA <- as.formula(FORMULA)
+design <- model.matrix(FORMULA, module.scores.meta)
+
+colnames(design) <- gsub("PC1_cat2", "", colnames(design))
+rownames(design) <- module.scores.meta$sample
+
+fit <- RunLimma(eset, design_matrix = design, add_random_effect = TRUE, 
+                block_this_variable = "Donor",
+                do_contrast_fit = FALSE, my_contrast_matrix = NULL)
+
+# make contrasts
+CONTRAST <- c("PC1_low - HC","PC1_high - HC","PC1_high - PC1_low")
+CONTRAST_NAME <- c("PC1_lowvsHC", "PC1_highvsHC", "PC1_highvsPC1_low")
+toptab.list = list()
+
+contrast_mat <- makeContrasts(contrasts = CONTRAST, levels = colnames(design)) 
+colnames(contrast_mat) <- CONTRAST_NAME
+  
+# contrast_fit
+cfit <- contrasts.fit(fit, contrasts = contrast_mat)
+cfit <- eBayes(cfit)
+
+for (i in 1:length(CONTRAST)){
+  toptab <- topTable(cfit, number = nrow(cfit), coef = CONTRAST_NAME[[i]]) %>%
+    rownames_to_column(var = "gene")
+  toptab.list[[i]] <- toptab
+}
+
+names(toptab.list) <- CONTRAST_NAME
+# saveRDS(toptab.list, file.path(OUT_DIR, "module_score_gsva.Mono.M4M11.Brescia.limmapval.rds"))
+# toptab.list <- readRDS(file.path(OUT_DIR, "module_score_gsva.Mono.M4M11.Brescia.limmapval.rds"))
+
+# add limma pvalue to the plot
+toptab.df <- dplyr::bind_rows(toptab.list, .id = "contrast") %>%
+  separate(col = "gene", into = c("geneset","celltype"), sep = "--") %>%
+  separate(col = "contrast", into = c("group1","group2"), sep = "vs")
+module.scores.df <- module.scores.df %>% 
+  dplyr::mutate(PC1_cat2 = factor(replace(as.character(.$PC1_cat), .$Class == "HC", "HC"), levels = c("HC","PC1_low","PC1_high"))) %>%
+  filter(!is.na(PC1_cat2))
+
+# pdf("figures/Bresciadata.module.score.Monoc.M4M11.PC1.EDFig1i.pdf", width = 20, height = 6)
+celltypes <- "Mono_Classical"
+for (i in celltypes){
+  df <- filter(module.scores.df, celltype == i, geneset == "m.and.f.union")
+  pval <- filter(toptab.df, celltype == i, geneset == "m.and.f.union") %>% 
+    mutate(y.position = c(0.5,0.7,0.4)) %>%
+    mutate(P.Value = ifelse(P.Value < 0.01, formatC(P.Value, format = "e", digits = 2), formatC(P.Value, format = "f", digits = 2)))
+  p <- ggplot(df, aes(x = PC1_cat2, y = module.score)) +
+    geom_boxplot(aes(fill=PC1_cat2, color= PC1_cat2), alpha = 0.2, width = 0.3, outlier.shape = NA)+
+    geom_point(aes(fill=PC1_cat2), shape = 21, color = "white", size = 4, position = position_jitterdodge(dodge.width = 0.9, jitter.width = 0.2)) +
+    scale_fill_manual(values = c("HC" = "#e5862d", "PC1_low" = "#B4C6A6", "PC1_high" = "#FFCE45"))+
+    scale_color_manual(values = c("HC" = "#e5862d", "PC1_low" = "#B4C6A6", "PC1_high" = "#FFCE45"))+
+    # facet_wrap(~geneset, scale = "free", ncol = 4) +
+    stat_pvalue_manual(pval, label = "P.Value", tip.length = 0.01,size = 7)+
+    theme_bw(base_size = 26)+
+    theme(axis.text.x = element_text(angle = 30, hjust = 1)) + 
+    ylim(c(min(df$module.score), max(df$module.score)+0.3))+
+    ggtitle(i)
+  print(p)
+}
+
+# dev.off()
+```
+
+```{r}
+sI <- sessionInfo()
+utils:::print.sessionInfo(sI[-c(10,11)])
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

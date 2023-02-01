@@ -1,0 +1,160 @@
+---
+title: "COVID Flu: Whole blood RNA-seq Pre-procressing"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+This markdown is provided for reference only as the original bulk transcriptomic dataset had additional samples 
+outside of the study cohort that would affect the normalization and filtering results.
+
+Please use the provided covid_flu.normalized.rna.data.RDS file for downstream analyses if identical results from the paper are desired 
+as those additional samples are not included in the published covid_flu.bulk.rna.count.data.RDS file.
+```{r setup,message=F}
+set.seed(9896)
+library(knitr)
+library(RUVSeq)
+library(org.Hs.eg.db)
+library(variancePartition)
+library(SummarizedExperiment)
+
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE)
+
+output.folder <- file.path("output","rna-seq")
+dir.create(output.folder)
+
+# count data
+rna.count.data <- readRDS(file.path("data","covid_flu.bulk.rna.count.data.RDS"))
+```
+
+```{r hidden,eval=F}
+rna.count.data <- readRDS("/hpcdata/sg/sg_data/users/lauwill/COVID/covid-flu/RNA-seq/input/covid.flu.rna.counts.RDS")
+rna.count.data$group <- gsub("healthy","HC",gsub("covid","COVR",rna.count.data$overall.group))
+rna.count.data$visit <- gsub("Baseline","Day -7",gsub("D","Day ",rna.count.data$visit))
+rna.count.data$alt.subject.id <- ifelse(rna.count.data$subject.id == "HD187","External",rna.count.data$subject.id)
+
+parameters.of.interest <- c("alt.subject.id","visit","covid.diagnosis.start.date.to.sample.drawn",
+                            "group","sex","age","race","ethnicity","flu.vax.count.10yr","vaccine",
+                            "vaccine.side.effects","long.covid.symptoms")
+
+colData(rna.count.data) <- colData(rna.count.data)[,c(intersect(parameters.of.interest,colnames(colData(rna.count.data))),
+                                                             "library.plate","library.well","isolation.batch","material.type")]
+```
+
+### Remove lowly expressed and normalize
+```{r normalize}
+countMatrix <- assays(rna.count.data)$count
+sample.info <- as.data.frame(colData(rna.count.data))
+sample.info$visit.overall.group <- interaction(sample.info$visit,sample.info$group)
+
+# update gene info
+cat("Update gene info:\n")
+gene.info <- as.data.frame(rowData(rna.count.data))
+tmp <- select(org.Hs.eg.db,keys = as.character(gene.info$entrezid),columns=c("ENTREZID","SYMBOL"),keytype="ENTREZID")
+cat("Number of Gene IDs that don't match:",sum(tmp$ENTREZID != gene.info$entrezid),"\n")
+cat("Number of gene symobls that don't match:",sum(tmp$SYMBOL != gene.info$symbol,na.rm = T),"\n")
+gene.info$symbol <- tmp$SYMBOL
+
+# filter genes by number of counts (> 0.5 cpm for at least 5 samples)
+isexpr <- rowSums(edgeR::cpm(countMatrix)>0.5) >= 5
+cat("Number of genes with low expression:",sum(!isexpr),"\n")
+
+geneExpr = DGEList(countMatrix[isexpr,])
+geneExpr = calcNormFactors(geneExpr)
+
+# estimate voom weights using mixed model
+form <- ~ visit.overall.group + (1|library.plate) + (1|alt.subject.id)
+vobjDream <- voomWithDreamWeights(geneExpr, form, sample.info)
+geneExpr <- vobjDream$E
+```
+
+### Identify latent factors using duplicates
+Also generate corrected expression values with identified latent factors regressed out
+```{r latent.analysis}
+num.latent.var <- 4
+cat("Number of latent variables to derive:",num.latent.var,"\n")
+
+# estimate unwanted variation using duplicates
+sample.info$subject.visit <- interaction(sample.info$alt.subject.id,sample.info$visit)
+duplicates <- subset(sample.info,subject.visit %in% names(which(table(sample.info$subject.visit) > 1)) & visit != "control")
+
+# estimate unwanted variation using Day -7 and Day 0 samples of HC and Controls
+selected <- subset(sample.info,(visit %in% c("Day -7","Day 0") & group == "HC"))
+replicates <- 1:nrow(sample.info)
+names(replicates) <- rownames(sample.info)
+replicates[rownames(selected)] <- selected$alt.subject.id
+replicate.samples <- makeGroups(replicates)
+
+seqRUVs <- RUVs(geneExpr,rownames(geneExpr),num.latent.var,replicate.samples,isLog = T)
+normalized.expr <- seqRUVs$normalizedCounts
+```
+
+### Remove unstable genes 
+1) Use pre-vaccination samples to remove genes that are temporally unstable
+
+2) Use control samples to remove genes that are technically unstable
+```{r filtering}
+var.threshold <- log10(2)
+
+# remove any genes where variance explained by subject is still not sig.
+test.samples <- subset(sample.info,(visit %in% c("Day -7","Day 0") & group == "HC") | (visit == "control"))
+intra.and.inter.subject.variance <- suppressWarnings(bplapply(rownames(normalized.expr),function(x,info){
+  model.string <- paste0("~ alt.subject.id")
+  base.model <- as.formula(paste0(x, model.string))
+  base.model.res <- lm(base.model,info)
+  model.fit <- summary(base.model.res)$r.squared
+  return(cbind(gene=x,broom::tidy(anova(base.model.res))[1,],r.sq=model.fit))
+},info=cbind(test.samples,t(normalized.expr[,rownames(test.samples)]))))
+intra.and.inter.subject.variance <- do.call(rbind,intra.and.inter.subject.variance)
+intra.and.inter.subject.variance$adj.pval <- p.adjust(intra.and.inter.subject.variance$p.value,method="BH")
+temporal.stable.genes <- subset(intra.and.inter.subject.variance,adj.pval < 0.05)$gene
+cat("Number of intra-subject stable genes:",length(temporal.stable.genes),"\n")
+
+# remove genes whose variance in control samples are larger than the variance in cohort samples by a predefined threshold
+participant.counts <- normalized.expr[,rna.count.data$visit != "control"]
+participant.count.var <- apply(participant.counts,1,var)
+isvar <- TRUE
+for (i in unique(subset(sample.info,visit == "control")$alt.subject.id)) {
+  control.counts <- normalized.expr[,rna.count.data$alt.subject.id == i]
+  control.count.var <- apply(control.counts,1,var)
+  print(plot(apply(control.counts,1,mean),log10((participant.count.var + 1e-5)/(control.count.var + 1e-5)),
+     xlab="Technical Control Mean CPM",ylab="Participant/Technical-Control Sample Variance (log10)"))
+  abline(coef = c(0,0))
+  isvar <- isvar & log10((participant.count.var + 1e-5)/(control.count.var + 1e-5)) > var.threshold
+}
+cat("Number of genes with high noise:",sum(!isvar),"\n")
+genes.to.keep <- names(which(isvar == T))
+genes.to.keep <- intersect(temporal.stable.genes,genes.to.keep)
+cat("Number of genes retained for downstream analyses:",length(genes.to.keep),"\n")
+```
+
+### Save ExperimentSet
+```{r save}
+normalized.rna.data <- SummarizedExperiment(assays = list(voom.norm.count=geneExpr[genes.to.keep,],
+                                                          seqRUV.norm.count=normalized.expr[genes.to.keep,]),
+                                            rowData=gene.info[genes.to.keep,],
+                                            colData=cbind(sample.info,seqRUVs$W[rownames(sample.info),]))
+
+saveRDS(normalized.rna.data,file=file.path(output.folder,"covid_flu.normalized.rna.data.RDS"))
+```
+
+```{r save.hidden,eval=F}
+normalized.rna.data <- SummarizedExperiment(assays = list(voom.norm.count=geneExpr[genes.to.keep,],
+                                                          seqRUV.norm.count=normalized.expr[genes.to.keep,]),
+                                            rowData=gene.info[genes.to.keep,],
+                                            colData=cbind(sample.info,seqRUVs$W[rownames(sample.info),]))
+
+normalized.rna.data <- normalized.rna.data[,normalized.rna.data$alt.subject.id != "External"]
+
+saveRDS(normalized.rna.data,file=file.path(output.folder,"covid_flu.normalized.rna.data.RDS"))
+```
+
+### Session Info
+```{r session}
+sessionInfo()
+```

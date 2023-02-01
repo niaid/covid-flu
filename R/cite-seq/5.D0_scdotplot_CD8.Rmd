@@ -1,0 +1,100 @@
+---
+title: "D0_scdotplot_CD8"
+output: html_document
+date: "2023-01-01"
+---
+
+```{r setup, message=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)  
+library(Seurat)
+library(tidyverse)
+library(matrixStats)
+library(parallelDist)
+library(RColorBrewer)
+```
+
+## Generate the single cell dotplot for D0 COVR vs. HC Leading-edge genes for CD8 centeral memory and CD8 effector memory  
+Download the Seurat object first and put it into input folder and read-in using the commented codes  
+**Generate Figure 1h-1i dotplots**  
+
+```{r input_seurat}
+merge <- readRDS(file.path("data","covid_flu.CITEseq.Seurat.obj.RDS"))
+merge$Timepoint.sex.group <- paste(merge$visit, merge$sex, merge$group,
+                                 sep = ".")
+CD8_Mem <- subset(merge, subset = cell.type %in% c("CD8_CM","CD8_EM"))
+CD8_Mem <- subset(CD8_Mem, subset = visit %in% c("Day 0"))
+# do a scTransform to remove batch
+CD8_Mem <- SCTransform(CD8_Mem, assay = "RNA", method = "glmGamPoi", vars.to.regress = "Batch", verbose = FALSE)
+DefaultAssay(CD8_Mem) <- "SCT"
+```
+
+format the LE sets to extract BTM-M7.3 T cell activation module LE from CD8-CM and CD8-EM  
+
+```{r input_LEgenes}
+selected.reset.M7.3.CM <- read.csv("data/LE_sets/pseudobulk.CD8_CM.vaccine.response.gsea.csv") %>%
+  filter(term %in% c("Baseline.covid.f","Baseline.covid.m")) %>%
+  filter(parameter %in% c("T cell activation (II) (M7.3)"))
+selected.reset.M7.3.EM <- read.csv("data/LE_sets/pseudobulk.CD8_EM.vaccine.response.gsea.csv") %>%
+  filter(term %in% c("Baseline.covid.f","Baseline.covid.m")) %>%
+  filter(parameter %in% c("T cell activation (II) (M7.3)"))
+CM.LE <- sapply(selected.reset.M7.3.CM$core_enrichment, function(x)str_split(x, "/"))
+names(CM.LE) <- c("Female", "Male")
+CM.LE <- c(CM.LE, list("m.and.f.union" = union(CM.LE[[1]], CM.LE[[2]]),
+              "m.and.f.intersect" = intersect(CM.LE[[1]], CM.LE[[2]])))
+EM.LE <- sapply(selected.reset.M7.3.EM$core_enrichment, function(x)str_split(x, "/"))
+names(EM.LE) <- c("Male", "Female")
+EM.LE <- c(EM.LE, list("m.and.f.union" = union(EM.LE[[1]], EM.LE[[2]]),
+              "m.and.f.intersect" = intersect(EM.LE[[1]], EM.LE[[2]])))
+
+selected.reset.M7.3 <- list("CD8_CM" = CM.LE,
+                            "CD8_EM" = EM.LE)
+# saveRDS(selected.reset.M7.3,"input/LE_sets/CD8_CM_EM.LE.M7.3activation.RDS")
+```
+
+select interested LE genes to show (limit the numbers of genes showed in figure to save space)  
+showing example LE genes  
+```{r norm_and_select_genes1}
+CD8_Mem$sex.group <- factor(paste(CD8_Mem$sex, CD8_Mem$group, sep = "."), levels = c("Male.COVR","Male.HC","Female.COVR","Female.HC"))
+
+# CD8-CM
+CD8_CM <- subset(CD8_Mem, subset = cell.type == "CD8_CM")
+Idents(CD8_CM) <- "group"
+markers <- FindMarkers(CD8_CM, ident.1 = "COVR", ident.2 = "HC", min.pct = 0.1, only.pos = TRUE, logfc.threshold = 0)
+# remove low expressed genes (<10%)
+selected.genes.cm <- intersect(selected.reset.M7.3$CD8_CM$m.and.f.union, rownames(markers))
+
+# CD8-EM
+CD8_EM <- subset(CD8_Mem, subset = cell.type == "CD8_EM")
+Idents(CD8_EM) <- "group"
+markers <- FindMarkers(CD8_EM, ident.1 = "COVR", ident.2 = "HC", min.pct = 0.1, only.pos = TRUE, logfc.threshold = 0)
+# remove low expressed genes (<10%)
+selected.genes.em <- intersect(selected.reset.M7.3$CD8_EM$m.and.f.union, rownames(markers))
+```
+
+
+Dotplots  
+**Fig 1h,1i**  
+```{r dotplots, fig.width = 7, fig.height = 3.8}
+# CD8-CM
+# pdf(file = "figures/CD8_CM.Tactivation.baselineLE.dotplot.fig1h.pdf", width = 7.5, height = 3.5)
+DotPlot(CD8_CM, features = selected.genes.cm, group.by = "sex.group", dot.scale = 10, cols = c("gray95", "blue")) + 
+  RotatedAxis()+ggtitle("D0 (Baseline) LE genes")+theme(axis.text=element_text(size=16))+
+  scale_size(range=c(0,10))
+# dev.off()
+
+# CD8-EM
+# pdf(file = "figures/CD8_EM.Tactivation.baselineLE.dotplot.fig1i.pdf", width = 7.5, height = 3.5)
+DotPlot(CD8_EM, features = selected.genes.em, group.by = "sex.group", dot.scale = 10, cols = c("gray95", "blue")) + 
+  RotatedAxis()+ggtitle("D0 (Baseline) LE genes")+theme(axis.text=element_text(size=16))+
+  scale_size(range=c(0,10))
+# dev.off()
+```
+
+  
+```{r}
+sI <- sessionInfo()
+utils:::print.sessionInfo(sI[-c(10,11)])
+```
+
+
+

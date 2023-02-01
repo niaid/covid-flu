@@ -1,0 +1,69 @@
+---
+title: "acute_covid_scmono_M4M11sig"
+output: html_document
+date: "2023-01-09"
+---
+
+```{r setup, message=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(Seurat)
+library(tidyverse)
+library(matrixStats)
+library(parallelDist)
+library(RColorBrewer)
+library(reshape2)
+library(viridis)
+library(ggrastr)
+```
+
+
+## Monocyte repressed innate immune signature expression in acute COVID data
+## acute COVID data from Liu et al, Cell, 2021  
+Download the Seurat object from GSE161918
+And put it in the data/other_datasets/acute_covid/ folder
+**Generate Extended Data Figure 1i dot plot**  
+
+```{r input_seurat}
+Brescia_covid <- readRDS(file.path("data","other_datasets","acute_covid","GSE161918_AllBatches_SeuratObj.rds"))
+Brescia_mono <- subset(Brescia_covid, subset = Sorted == "N" & coursecelltype %in% c("Mono") & celltypeQC == TRUE)
+
+# show the same genes as in main figure
+selected.genes.mc <- c("PTAFR","TLR8","NOD2","CLEC4E","TLR2", "TLR5",
+                       "LILRB3","FCER1G","FCGRT","SLC7A7","CYBB","CFP","SIRPA",
+                       "SLC31A2","SCPEP1","RNF130","RASSF4","CYP1B1")
+# do a scTransform to remove batch
+Brescia_mono <- SCTransform(Brescia_mono, assay = "RNA", method = "glmGamPoi", vars.to.regress = "Batch", verbose = FALSE)
+DefaultAssay(Brescia_mono) <- "SCT"
+```
+  
+  
+Classical Monocytes  
+showing the signature genes as example in Figure 1 classical monocytes  
+Dotplots  
+**Extended Data Fig 1i**  
+
+```{r dotplots, fig.width = 7, fig.height = 3}
+Brescia_mono$PC1_cat2 <- replace(as.character(Brescia_mono$PC1_cat), as.character(Brescia_mono$Class) == "HC", "HC")
+Brescia_mono$PC1_cat2 <- factor(Brescia_mono$PC1_cat2, levels = c("PC1_high","PC1_low","HC"))
+Brescia_monoc <- subset(Brescia_mono, subset = WCTcoursecelltype == "Mono_Classical" & PC1_cat2 %in% c("HC","PC1_high","PC1_low"))
+
+# pdf(file = "figures/Brescia.monoc.baselineLE.dotplot.EDFig1i.pdf", width = 7, height = 3)
+DotPlot(Brescia_monoc, assay = "RNA", features = selected.genes.mc, group.by = "PC1_cat2", dot.scale = 10, cols = c("gray95", "blue"))+
+  RotatedAxis()+ggtitle("D0 (Baseline) LE genes")+theme(axis.text=element_text(size=12))+
+  scale_size(range=c(0,10))+
+  scale_y_discrete(labels=c("More_severe", "Less_severe", "HC"))
+# dev.off()
+```
+
+
+```{r}
+sI <- sessionInfo()
+utils:::print.sessionInfo(sI[-c(10,11)])
+```
+
+
+
+
+
+
+

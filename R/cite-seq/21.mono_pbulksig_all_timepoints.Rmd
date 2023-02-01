@@ -1,0 +1,218 @@
+---
+title: "mono_pbulksig_all_timepoints"
+output: html_document
+date: "2023-01-05"
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(edgeR)
+library(GSVA)
+library(Biobase)
+library(reshape2)
+library(tidyverse)
+library(ggpubr)
+library(openxlsx)
+library(SummarizedExperiment)
+library(BiocParallel)
+library(doParallel)
+param = SnowParam(32,"SOCK",progressbar = F)
+register(param)
+registerDoParallel()
+
+source('utils/dream.models.R')
+loadLibraries()
+
+```
+
+## Get GSVA score of acute COVID related gene signatures for Extended Data Figure 5d-5e
+using the genesets that are significanlty enriched during acute COVID in monocytes and see their change after flu vaccination
+input is output from filtered and normalized pseudobulk objects  
+Leading-edge genes from acute COVID data Liu et al, Cell, 2021: Antigen presentation sets, HALLMARK-Inflammatory response, HALLMARK-TNFa signaling via NF-kB; MS1 monocyte signature from Reyes et al,Sci. Transl. Med., 2021
+
+**Generate Extended Data Fig 5d and 5e, Supplementary Figure 2e**  
+Seurat object needs to be downloaded and put in data/ folder, pseudobulk lists generated using the pooling functions  
+
+```{r input}
+# plotting functions
+source("utils/boxplot_mono_pbulk_scores.R")
+# Generate pseudobulk lists and set parameters for pbulk input/output
+DGELISTS_IN_PATH <- "output/CITE-seq/covid_flu.CITEseq.pseudobulk.gene.expr.filtered.RDS"
+OUT_DIR <- "output/pbulk/gsva/"
+dir.create(OUT_DIR, recursive = TRUE)
+
+pbulk_list <- readRDS(DGELISTS_IN_PATH)
+
+# read in geneset list from Acute COVID cohort
+celltypes = c("Mono_Classical","Mono_NonClassical")
+Brescia.LElist <- list()
+for (i in celltypes) {
+  Brescia_mono_covid <- read.table(paste("data/other_datasets/acute_covid/", i, "--model@healthy_vs_covid--coef@COVID-Healthy--fgsea.tsv", sep = ""), header = TRUE, sep = "\t")
+  Brescia_mono_pc1 <- read.table(paste("data/other_datasets/acute_covid/", i, "--model@PC1--coef@PC1--fgsea.tsv", sep = ""), header = TRUE, sep = "\t")
+
+  mono_covid_Agpre <- Brescia_mono_covid %>% filter(pathway %in% c("reactome_Antigen processing-Cross presentation","reactome_MHC class II antigen presentation","KEGG_ANTIGEN_PROCESSING_AND_PRESENTATION"))
+  mono_covid_Agpre_LE <- unique(unlist(sapply(mono_covid_Agpre$leadingEdge, function(x) str_split(x, pattern = " "))))
+  mono_covid_NFkB <- Brescia_mono_covid %>% filter(pathway %in% c("HALLMARK_TNFA_SIGNALING_VIA_NFKB"))
+  mono_covid_NFkB_LE <- unique(unlist(sapply(mono_covid_NFkB$leadingEdge, function(x) str_split(x, pattern = " "))))
+  mono_covid_inflam <- Brescia_mono_covid %>% filter(pathway %in% c("HALLMARK_INFLAMMATORY_RESPONSE"))
+  mono_covid_inflam_LE <- unique(unlist(sapply(mono_covid_inflam$leadingEdge, function(x) str_split(x, pattern = " "))))
+  
+  ### MS1 signature from Reyes et al, Sci. Transl. Med. (2021)
+  MS1_module <- c("S100A8","VCAN","VIM","LGALS1","MNDA","CTSD","TIMP1","NCF1", "S100A12","LILRA5","SELL","MCEMP1","CLU","VAMP5","CYP1B1","CD163","ACSL1","SOD2", "ALOX5AP","CTSA","VNN2","IL1R2","STXBP2","NAMPT","CALR","PLAC8","ANXA6","LYZ","RETN","NKG7")
+  Brescia.LElist[[i]] <- list("mono_covid_Agpre_LE" = mono_covid_Agpre_LE, "mono_covid_inflam_LE" = mono_covid_inflam_LE, 
+                              "mono_covid_NFkB_LE" = mono_covid_NFkB_LE, "MS1_module" = MS1_module)
+}
+
+# list of expression data by cell type
+eset_list <- lapply(pbulk_list, function(dge){
+  mat <- dge$normalizedExpr
+  meta <- dge$samples
+  ExpressionSet(assayData = mat, phenoData = AnnotatedDataFrame(meta))
+})
+
+eset_list_mono <- eset_list[c("Mono_Classical", "Mono_NonClassical")]
+```
+  
+  
+Calculate module scores
+```{r cal_score}
+scores_list <- lapply(1:length(eset_list_mono), function(eset){
+  cat(names(eset_list_mono)[eset],"\n")
+  celltype.gsea.res <- Brescia.LElist[[names(eset_list_mono)[eset]]]
+  # if (nrow(celltype.gsea.res) > 0) {
+  module.scores <- gsva(expr = eset_list_mono[[eset]], gset.idx.list = celltype.gsea.res, method = "gsva", parallel.sz = 16, min.sz = 5)
+  return(cbind(reshape2::melt(exprs(module.scores)),celltype= names(eset_list_mono)[eset]))
+  # }
+})
+
+module.scores.df <- do.call("rbind",scores_list)
+colnames(module.scores.df) <- c("geneset","sample","module.score","celltype")
+# add meta data and transform the dataframe into esetlist
+meta <- pbulk_list$Mono$samples[,c("alt.subject.id", "age", "Batch","visit","sex","race","group","flu.vax.count.10yr","vaccine.side.effects","long.covid.symptoms", "visit.overall.group.sex")] 
+meta$sample <- rownames(meta)
+meta$sample_id <- paste(meta$alt.subject.id, meta$visit.overall.group.sex, sep = ".")
+
+# add other info
+module.scores.df$geneset_celltype <- paste0(module.scores.df$geneset,"--",module.scores.df$celltype)
+module.scores.df <- left_join(module.scores.df, 
+                              meta,
+                              by=c("sample"))
+write.csv(module.scores.df, file.path(OUT_DIR, "module_score_gsva_filtered_samples_genes_df.Mono.BresciaLE.csv"))
+
+# module.scores.df <- read.csv(paste(OUT_DIR, "module_score_gsva_filtered_samples_genes_df.Mono.BresciaLE.csv", sep = ""),
+#                              row.names = 1)
+
+# calculate mean for some duplicated samples
+meta.sample <- meta[,c("sample_id","alt.subject.id", "visit", "sex", "race", "group", "flu.vax.count.10yr", "vaccine.side.effects", "long.covid.symptoms", "visit.overall.group.sex")] %>%
+  distinct() %>%
+  filter(alt.subject.id != "Control")
+
+module.scores.df.sample <- module.scores.df %>% 
+  group_by(celltype, geneset, sample_id) %>%
+  dplyr::summarise(module.score.mean = mean(module.score)) %>%
+  inner_join(meta.sample, by=c("sample_id"))
+
+module.scores.df.sample <- module.scores.df.sample %>% 
+  mutate(sex.group = factor(paste(sex, group, sep = "."), levels = c("Female.HC","Female.COVR","Male.HC","Male.COVR"))) %>%
+  mutate(group.timepoint = factor(paste(group, visit, sep = "."),levels = c("HC.Day 0","HC.Day 1","HC.Day 28","COVR.Day 0","COVR.Day 1","COVR.Day 28"))) %>%
+  mutate(group = factor(group, levels = c("HC","COVR")) )
+
+module.scores.df.f <- filter(module.scores.df.sample, sex == "Female")
+module.scores.df.m <- filter(module.scores.df.sample, sex == "Male")
+```
+
+
+p-values calculation for D1 vs D0, D28 vs D0 scores
+Post-vaccine Model: use dream model to account for confounding factors and treat subject as random effect
+```{r vaccine.response}
+module.scores <- read.csv(file.path(OUT_DIR,"module_score_gsva_filtered_samples_genes_df.Mono.BresciaLE.csv"), row.names = 1)
+genesets <- unique(module.scores$geneset)
+
+model.res <- data.frame()
+for (i in unique(module.scores$celltype)) {
+  tryCatch({
+    cat(i,"-\n")
+    cell.type.modules <- subset(module.scores,celltype == i & !is.na(sex))
+    cell.type.modules <- reshape2::dcast(cell.type.modules,
+                                         Batch + alt.subject.id + visit + age + sex + race + group + flu.vax.count.10yr ~ geneset,value.var = "module.score")
+
+    # using D0 only as pre-vax baseline
+   exprObj = data.frame(t(cell.type.modules[,genesets]))
+   colnames(exprObj) <- NULL
+    timepoint.model.fit <- timepoint.condition.model(exprObj,cell.type.modules,c("Day 0"))
+    
+    # timepoint group diff
+    timepoint.model.de.res <- model.term.statistics(timepoint.model.fit,grep("(D1|D28).v.baseline.COVR",
+                                                     colnames(timepoint.model.fit$coefficients),value = T))
+    model.res <- rbind(model.res,cbind(cell.type=i,timepoint.model.de.res))
+  },error=function(err_msg){message(err_msg)})
+}
+```
+
+
+
+### Boxplots for all timepoints in COVR group
+**Extended Data Fig 5d and 5e**
+```{r boxplot1, fig.width=20, fig.height=6}
+# add pvalues from the dream model
+model.res.p <- model.res %>% 
+  separate(col = "term", into = c("group2","group"), sep = "\\.v\\.") %>%
+  separate(col = "group", into = c("group1","group","sex"), sep = "\\.") %>%
+  mutate(group1 = "Day 0") %>%
+  mutate(group2 = sub("D", "Day ", x = group2)) %>%
+  mutate(geneset = parameter)
+
+
+# Female
+celltypes <- unique(module.scores.df.f$celltype)
+for (i in celltypes){
+  df <- filter(module.scores.df.f, celltype == i)
+  pval <- filter(model.res.p, cell.type == i, sex == "Female") %>% 
+    arrange(parameter, group2) %>%
+    mutate(y.position = rep(c(0.5,0.7),4)) %>%
+    mutate(P.Value = ifelse(P.Value < 0.01, formatC(P.Value, format = "e", digits = 2), formatC(P.Value, format = "f", digits = 3)))
+  p <- plotcelltype_group_covid(df) + ggtitle(i)
+  print(p)
+}
+
+# Male
+celltypes <- unique(module.scores.df.m$celltype)
+for (i in celltypes){
+  df <- filter(module.scores.df.m, celltype == i)
+    pval <- filter(model.res.p, cell.type == i, sex == "Male") %>% 
+    arrange(parameter, group2) %>%
+    mutate(y.position = rep(c(0.5,0.7),4)) %>%
+    mutate(P.Value = ifelse(P.Value < 0.01, formatC(P.Value, format = "e", digits = 2), formatC(P.Value, format = "f", digits = 3)))
+  p <- plotcelltype_group_covid(df) + ggtitle(i)
+  print(p)
+}
+
+```
+
+
+### Boxplots for Day 0: COVR vs HC
+**Supplementary Fig 2e**
+```{r boxplot2, fig.width=20, fig.height=6}
+module.scores.df.sample.D0 <- filter(module.scores.df.sample, visit == "Day 0")
+module.scores.df.D0.f <- filter(module.scores.df.sample.D0, sex == "Female")
+module.scores.df.D0.m <- filter(module.scores.df.sample.D0, sex == "Male")
+
+# pdf("figures/module.score.Mono.BresciaLE.D0.SupFig2e.pdf", width = 20, height = 4.5)
+# Female
+df <- filter(module.scores.df.D0.f, celltype == "Mono_Classical")
+p <- plotcelltype_group(df) + ggtitle(i)
+print(p)
+
+# Male
+df <- filter(module.scores.df.D0.m, celltype == "Mono_Classical")
+p <- plotcelltype_group(df) + ggtitle(i)
+print(p)
+
+# dev.off()
+```
+
+```{r}
+sI <- sessionInfo()
+utils:::print.sessionInfo(sI[-c(10,11)])
+```
+

@@ -1,0 +1,146 @@
+---
+title: "scTCR_diversity_metric"
+output: html_document
+date: "2023-01-11"
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(tidyverse)
+library(ggpubr)
+```
+
+## single cell TCR diversity metrics in CD8 subsets  
+Calculate TCR diversity metrics in CD8 subsets for Extended Data Figure 4g, 4h  
+**Generate boxplots for Extended Data Figure 4g, 4h**  
+**P-values calculated here are slightly different from what shown in the paper. It's due to the metadata change for publication reason, which affect the subject/clone order for the sampling process**   
+Single cell TCR data downloaded from Zenodo and put in data/TCR/ folder as input  
+
+```{r input}
+source("utils/clone_diversity_metric.R")
+tcr_combined <- read.csv(file.path("data", "TCR", "tenx_filtered_scTCR_anno.csv"))
+tcr_combined_CD8 <- filter(tcr_combined, coarse.cell.type == "CD8") %>%
+  mutate(cell.type.GPR56 = paste(cell.type, GPR56_level, sep = "-")) %>%
+  mutate(cellsubset = replace(.$cell.type, .$cell.type %in% c("CD8_EM","CD8_TEMRA"), .$cell.type.GPR56[which(.$cell.type %in% c("CD8_EM","CD8_TEMRA"))])) %>%
+  filter(cellsubset %in% c("CD8_CM", "CD8_EM-GPR56-", "CD8_EM-GPR56+", "CD8_Naive", "CD8_TEMRA-GPR56+", "CD8_TRM")) %>%
+  mutate(sample_id = sub(pattern = "Day ", replacement = "D", paste(alt.subject.id, visit, sep = ".")))
+
+
+# get CD8 clones
+clones_CD8 <- tcr_combined_CD8 %>% 
+  select(alt.subject.id, sample_id, visit, sex, age, group, cell.type,
+         cellsubset, Timepoint.sex.group, CTaa_tcr) %>% 
+  distinct()
+table(table(clones_CD8$CTaa_tcr))
+
+clonotypes_list <- with(tcr_combined_CD8, split(CTaa_tcr, paste(sample_id, cellsubset, sep =".")))
+length(clonotypes_list)
+clonotypes_list_CD8 <- clonotypes_list[names(clonotypes_list)[str_detect(names(clonotypes_list), "CD8_EM.GPR56\\+")]]
+# hist(sapply(clonotypes_list_CD8, length))
+```
+
+Calculate diversity metrics  
+Subsample to lowest number of tcr's and then compute diversity metrics  
+```{r}
+MIN_CELLS_CD8 <- 50
+clonotypes_list_CD8 <- clonotypes_list[sapply(clonotypes_list, length) > MIN_CELLS_CD8]
+length(clonotypes_list_CD8)
+
+set.seed(123)
+subsample_size_CD8 <- min(sapply(clonotypes_list_CD8, length))
+
+diversity_results_CD8 <- lapply(clonotypes_list_CD8, function(clone_vec){
+  replicate(1000, diversity_all(x = sample(clone_vec, size = subsample_size_CD8), x_type = "clonotypes"))
+})
+
+diversity_dat_CD8 <- diversity_results_CD8 %>%
+  lapply(t) %>%
+  lapply(as.data.frame) %>%
+  bind_rows(.id = "Subj_time_cell") %>%
+  separate(Subj_time_cell, into = c("Subject", "Timepoint", "cellsubset"), sep = "\\.")
+
+diversity_dat_summary <- 
+  diversity_dat_CD8 %>%
+  gather(key = measure, value = value, -c(Subject, Timepoint, cellsubset)) %>%
+  group_by(Subject, Timepoint, cellsubset, measure) %>%
+  dplyr::summarise(median1000 = median(value)) %>%
+  mutate("Subject_time" = paste(Subject, Timepoint, sep = "_")) %>%
+  mutate("cellsubset_measure" = paste(cellsubset, measure, sep = "."))
+
+# add metadata
+subject_meta = read.csv("data/covid.flu.subject.meta.csv") %>% 
+  filter(alt.subject.id %in% unique(diversity_dat_summary$Subject))
+
+diversity_dat_summary <- left_join(diversity_dat_summary, subject_meta, by = c("Subject" = "alt.subject.id"))
+diversity_dat_summary$sex.timepoint <- paste(diversity_dat_summary$sex, diversity_dat_summary$Timepoint, sep = ".")
+diversity_dat_summary$group.timepoint <- paste(diversity_dat_summary$overall.group, diversity_dat_summary$Timepoint, sep = ".")
+diversity_dat_summary$sex.group <- factor(paste(diversity_dat_summary$sex, diversity_dat_summary$overall.group, sep = "."), levels = c("Female.HC","Female.COVR","Male.HC","Male.COVR"))
+
+diversity_dat_summary_wide <- reshape2::dcast(diversity_dat_summary, 
+                                    Subject_time ~ cellsubset_measure, 
+                                    value.var = "median1000")
+diversity_dat_summary <- filter(diversity_dat_summary, cellsubset != "CD8_TRM") %>%
+  mutate(cellsubset = factor(cellsubset, levels = c("CD8_EM-GPR56+","CD8_EM-GPR56-","CD8_TEMRA-GPR56+","CD8_CM","CD8_Naive")))
+
+```
+
+
+Boxplot for D0 (baseline) CD8 subsets TCR clone diversity   
+**Extended Data Fig 4g boxplot**  
+```{r D0_clone, fig.width = 5, fig.height = 6}
+my_comparisons1 <- list(c("CD8_EM-GPR56+","CD8_EM-GPR56-"),
+                        c("CD8_EM-GPR56+","CD8_TEMRA-GPR56+"),
+                        c("CD8_EM-GPR56+","CD8_CM"),
+                        c("CD8_Naive","CD8_EM-GPR56+"))
+
+tmp = filter(diversity_dat_summary, 
+             overall.group == "COVR",
+             Timepoint == "D0",
+             measure == "shannon")
+# pdf("figures/CD8_population_diversity_metric_celltypeD0.EDFig4g.pdf", width = 5, height = 7)
+ggplot(tmp, aes(x = cellsubset, y = median1000) )+
+  geom_boxplot(alpha = 0.4,  outlier.shape = NA)+
+  geom_point(aes(fill=sex), shape = 21, color = "white", size = 3, position = position_jitter(width = 0.3)) +
+  scale_color_manual(values = c("Female"="#BD3B29", "Male"="#0472B6"))+
+  scale_fill_manual(values = c("Female"="#BD3B29", "Male"="#0472B6"))+
+  stat_compare_means(comparisons = my_comparisons1, method = "wilcox.test", size = 6)+
+  theme_bw(base_size = 20)+
+  ylim(c(1.5,5.2))+
+  ylab("Shannon index")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# dev.off()
+```
+
+Boxplot for TCR clone diversity at different timepoints in GPR56+ CD8-EM and CD8-TEMRA populations   
+**Extended Data Fig 4h boxplot**  
+```{r clone_visit, fig.width = 10, fig.height = 6}
+tmp = filter(diversity_dat_summary, 
+             overall.group == "COVR",
+             measure == "shannon",
+             cellsubset %in% c("CD8_EM-GPR56+", "CD8_TEMRA-GPR56+"))
+# pdf("figuers/CD8_population_diversity_metric_timepoint.pdf", width = 17, height = 5.5)
+my_comparisons1 <- list(c("D0","D1"),c("D0","D28"),c("D1","D28"))
+ggplot(tmp, aes(x = Timepoint, y = median1000) )+
+  geom_boxplot(alpha = 0.4,  outlier.shape = NA)+
+  geom_point(aes(fill=sex), shape = 21, color = "white", size = 3, position = position_jitter(width = 0.3)) +
+  scale_color_manual(values = c("Female"="#BD3B29", "Male"="#0472B6"))+
+  scale_fill_manual(values = c("Female"="#BD3B29", "Male"="#0472B6"))+
+  stat_compare_means(comparisons = my_comparisons1, method = "wilcox.test", size = 6, label.y = c(4, 4.3, 4.6))+
+  facet_wrap(~cellsubset+measure, scales = "free", ncol = 5)+
+  theme_bw(base_size = 20)+
+  ylim(c(1.5,5))+
+  ylab("Shannon index")+
+  ggtitle("Shannon index")
+# dev.off()
+```
+
+
+SessionInfo  
+```{r}
+sI <- sessionInfo()
+utils:::print.sessionInfo(sI[-c(10,11)])
+```
+
+
+
+

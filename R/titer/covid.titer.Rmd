@@ -1,0 +1,107 @@
+---
+title: "COVID Flu: CoV2 Titer and SPR"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, message=FALSE}
+library(knitr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(SummarizedExperiment)
+library(emmeans)
+library(BiocParallel)
+param = SnowParam(32,"SOCK",progressbar = T)
+register(param)
+
+source('R/utils/visualization.R')
+source('R/utils/dream.models.R')
+loadLibraries()
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","titer")
+output.prefix <- "covid.spr.titer."
+dir.create(output.folder)
+figure.folder <- "figures"
+dir.create(figure.folder)
+```
+
+#### Import and transform data
+Convert to log2 values with an offset
+```{r transform}
+offset <- 1
+
+# Titer D0 and D28
+titer.data <- read.csv(file.path("data","covid_flu.SARS.CoV2.titer.and.avidity.data.csv"),check.names = F,na.strings = "")
+titer.params <- colnames(titer.data)[3:4]
+
+# Subject info from RNA-Seq data
+rna.count.data <- readRDS(file.path("data","covid_flu.bulk.rna.count.data.RDS"))
+subject.visit.info <- as.data.frame(colData(rna.count.data))
+subject.visit.info <- unique(subject.visit.info[,1:10])
+subject.visit.info$group <- factor(subject.visit.info$group,levels = c("HC","COVR"))
+
+joined.data <- merge(subject.visit.info,titer.data,by=c("alt.subject.id","visit"))
+rownames(joined.data) <- paste0(joined.data$alt.subject.id,".",gsub("Day ","D",joined.data$visit))
+titer.params.log2 <- paste0("log2.",titer.params)
+joined.data[,titer.params.log2] <- log2(joined.data[,titer.params] + offset)
+
+table(joined.data$visit)
+joined.data.under65 <- subset(joined.data,age < 65)
+```
+
+#### Baseline Model
+What are the differences before flu vaccination?
+```{r baseline.model}
+baseline.joined.data <- subset(joined.data,visit == "Day 0")
+
+baseline.model.fit <- baseline.condition.model(t(baseline.joined.data[,titer.params.log2]),
+                                               baseline.joined.data,random.effects = NA,bayes = F)
+baseline.model.de.res <- model.term.statistics(eBayes(baseline.model.fit),c("COVR.v.HC","COVR.male.v.female","COVR.m","COVR.f"))
+
+write.csv(baseline.model.de.res,file.path(output.folder,paste0(output.prefix,"difference.at.baseline.csv")),row.names = F)
+```
+
+#### Association with TSD
+```{r baseline.tsd.asso,fig.cap="ED Fig. 1b"}
+baseline.joined.data.w.tsd <- subset(baseline.joined.data,!is.na(covid.diagnosis.start.date.to.sample.drawn))
+joined.data.under65$visit.sex <- paste0(joined.data.under65$visit,".",joined.data.under65$sex)
+
+tsd.scatter.plot(baseline.joined.data.w.tsd,titer.params.log2[2]) + ylab("log2 USA-WA1 IC50")
+ggsave(file.path(figure.folder,"ED.Fig1b.pdf"),width=4.5,height=3)
+
+# modeling
+tsd.model.fit <- baseline.tsd.association.model(t(apply(baseline.joined.data.w.tsd[,c(titer.params)],2,rank)),
+                                                baseline.joined.data.w.tsd,random.effects = NA,bayes=F)
+tsd.model.de.res <- model.term.statistics(eBayes(tsd.model.fit),grep("TSD",colnames(tsd.model.fit$coefficients),value=T))
+
+write.csv(tsd.model.de.res,file.path(output.folder,paste0(output.prefix,"tsd.association.at.baseline.csv")),row.names = F)
+
+```
+
+#### Contrast Vaccination Timepoints with Baseline
+Include only subjects < 65 years of age
+```{r timepoint.model}
+timepoint.model.fit.titer <- timepoint.condition.model(t(joined.data.under65[,c(titer.params.log2)]),joined.data.under65,c("Day 0"))
+timepoint.model.de.res <- model.term.statistics(timepoint.model.fit.titer,grep("sex.diff$|COVR.v.HC$|COVR.[mf]$|sub.baseline$|v.baseline",
+                                                                         colnames(timepoint.model.fit.titer$coefficients),value = T))
+timepoint.model.de.res[,c("visit","contrast")] <- do.call(rbind,sapply(timepoint.model.de.res$term,stringi::stri_split_fixed,pattern=".",n=2))
+
+write.csv(timepoint.model.de.res,file.path(output.folder,paste0(output.prefix,"timepoint.diff.sub.baseline.under65.csv")),row.names = F)
+
+```
+
+#### Session Info
+```{r session}
+sessionInfo()
+```

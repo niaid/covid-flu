@@ -1,0 +1,106 @@
+---
+title: "D0_scdotplot_mono"
+output: html_document
+date: "2023-01-01"
+---
+
+```{r setup, message=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(Seurat)
+library(tidyverse)
+library(matrixStats)
+library(parallelDist)
+library(RColorBrewer)
+```
+
+## Generate the single cell dotplot for D0 COVR vs. HC Leading-edge genes for classical monocytes and non-classical monocytes  
+Download the Seurat object first and put it into input folder and read-in using the commented codes  
+**Generate Figure 1f-1g dotplots**
+
+```{r input_seurat}
+merge <- readRDS(file.path("data","covid_flu.CITEseq.Seurat.obj.RDS"))
+merge$Timepoint.sex.group <- paste(merge$visit, merge$sex, merge$group,
+                                   sep = ".")
+mono <- subset(merge, subset = coarse.cell.type %in% c("Mono"))
+mono <- subset(mono, subset = visit %in% c("Day 0"))
+# do a scTransform to remove batch
+mono <- SCTransform(mono, assay = "RNA", method = "glmGamPoi", vars.to.regress = "Batch", verbose = FALSE)
+DefaultAssay(mono) <- "SCT"
+
+### input LE sets
+selected.reset.M4.M11 <- readRDS("data/LE_sets/mono.LE.and.reset.genesets.RDS")
+selected.set.M4M11.mono <- union(selected.reset.M4.M11$Mono_Classical$CITEseq.baseline.LE.Union.genesets$m.and.f.union,
+                            selected.reset.M4.M11$Mono_NonClassical$CITEseq.baseline.LE.Union.genesets$m.and.f.union)
+selected.set.M4M11.mono.f <- union(selected.reset.M4.M11$Mono_Classical$CITEseq.baseline.LE.Union.genesets$Female,
+                                   selected.reset.M4.M11$Mono_NonClassical$CITEseq.baseline.LE.Union.genesets$Female)
+selected.set.M4M11.mono.m <- union(selected.reset.M4.M11$Mono_Classical$CITEseq.baseline.LE.Union.genesets$Male,
+                                   selected.reset.M4.M11$Mono_NonClassical$CITEseq.baseline.LE.Union.genesets$Male)
+```
+
+
+Classical monocytes  
+select interested LE genes to show (limit the numbers of genes showed in figure to save space)  
+showing example LE genes  
+```{r norm_and_select_genes1}
+mono$sex.group <- factor(paste(mono$sex, mono$group, sep = "."), levels = c("Male.COVR","Male.HC","Female.COVR","Female.HC"))
+# split Mono_Classical and Mono_NonClassical
+monoc <- subset(mono,subset = cell.type == "Mono_Classical")
+mononc <- subset(mono,subset = cell.type == "Mono_NonClassical")
+
+# put the ones in GO:PRR and GO:immune receptor activity from the union
+selected.genes.mc <- c("PTAFR","TLR8","NOD2","CLEC4E","TLR2","TLR4","TLR5",
+                       "IL13RA1", "LILRA1","LILRB3","LILRA2","FPR1","FPR2","FCER1G",
+                       "FCGRT","CCR1","C5AR1","CTSH")
+# show LE genes that are lower in COVR vs. HC to shrink the genes to show
+Idents(monoc) <- "group"
+markers <- FindMarkers(monoc, ident.1 = "COVR", ident.2 = "HC", min.pct = 0.1, logfc.threshold = 0)
+markers.mc <- filter(markers, avg_log2FC < 0)
+# saveRDS(markers, "data/monoc.rna.markers.covidvshealthy.rds")
+# show genes that are repressed in COVR vs. HC, in the selected GO sets and shared by female and male GSEA test LE genes
+selected.genes.mc <- union(intersect(selected.genes.mc,
+                                     selected.reset.M4.M11$Mono_Classical$CITEseq.baseline.LE.Union.genesets$m.and.f.intersect),
+selected.reset.M4.M11$Mono_Classical$CITEseq.baseline.LE.Union.genesets$m.and.f.intersect[1:15])
+selected.genes.mc <- intersect(selected.genes.mc, rownames(markers.mc))
+
+```
+
+Non-Classical monocytes  
+select interested LE genes to show (limit the numbers of genes showed in figure to save space)  
+```{r norm_and_select_genes2}
+# put the ones in GO:PRR and GO:immune receptor activity
+selected.genes.mnc <- c("PTAFR","CLEC4E","CD14","FCN1","CD36","TLR2","TLR4", "IL13RA1","LILRA1","LILRB3","LILRA2","FPR1","FPR2","CSF2RA","FCER1G", "FCGR1A","FCGRT","CCR1","C5AR1","CTSH")
+Idents(mononc) <- "group"
+markers <- FindMarkers(mononc, ident.1 = "COVR", ident.2 = "HC", min.pct = 0.1, logfc.threshold = 0)
+markers.mnc <- filter(markers, avg_log2FC < 0)
+# saveRDS(markers, "output/mononc.rna.markers.covidvshealthy.rds")
+# save as above, but for Non-Classical Monocytes
+selected.genes.mnc <- union(intersect(selected.reset.M4.M11$Mono_NonClassical$CITEseq.baseline.LE.Union.genesets$m.and.f.intersect,
+                                      selected.genes.mnc),
+                           selected.reset.M4.M11$Mono_NonClassical$CITEseq.baseline.LE.Union.genesets$m.and.f.intersect[1:15])
+selected.genes.mnc <- intersect(selected.genes.mnc, rownames(markers))
+
+```
+
+Dotplots  
+**Fig 1f, 1g**  
+```{r dotplots, fig.width = 7, fig.height = 3.5}
+# pdf(file = "figures/monoc.baselineLE.dotplot.fig1f.pdf", width = 7, height = 3.5)
+# Classical Monocytes
+DotPlot(monoc, features = selected.genes.mc, group.by = "sex.group", dot.scale = 10, cols = c("gray95", "blue"))+
+  RotatedAxis()+ggtitle("D0 (Baseline) LE genes")+theme(axis.text=element_text(size=12))+
+  scale_size(range=c(0,10))
+# dev.off()
+
+# pdf(file = "figures/mononc.baselineLE.dotplot.fig1g.pdf", width = 6.9, height = 3.5)
+# Non-Classical Monocytes
+DotPlot(mononc, features = selected.genes.mnc, group.by = "sex.group", cols = c("gray95", "blue"))+
+  RotatedAxis()+ggtitle("D0 (Baseline) LE genes")+theme(axis.text=element_text(size=12))+
+  scale_size(range=c(0,10))
+# dev.off()
+```
+
+  
+```{r}
+sI <- sessionInfo()
+utils:::print.sessionInfo(sI[-c(10,11)])
+```

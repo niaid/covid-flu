@@ -1,0 +1,122 @@
+---
+title: "COVID Flu: Plasmablast Frequencies"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup,message=FALSE}
+library(knitr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(SummarizedExperiment)
+source('R/utils/dream.models.R')
+loadLibraries()
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","flow.and.cbc")
+dir.create(output.folder)
+figure.folder <- "figures"
+dir.create(figure.folder)
+output.prefix <- "covid_flu.cytek.pb."
+
+# cytek cell PB frequencies
+cytek.data.pb <- read.csv(file.path("data","covid_flu.cytek.Bcell.panel.plasmablast.counts.csv"),check.names = F)
+
+# Subject data within RNA-Seq data
+normalized.rna.data <- readRDS(file.path("data","covid_flu.bulk.rna.count.data.RDS"))
+sample.info <- as.data.frame(colData(normalized.rna.data))
+subject.visit.info <- unique(sample.info[,1:9])
+
+rownames(subject.visit.info) <- paste0(subject.visit.info$alt.subject.id,".",subject.visit.info$visit)
+```
+
+#### Normalization
+Calculate b cell frequencies as % lymphocytes
+```{r normalize.pb}
+normalize.by <- "Lymphocytes"
+cytek.data.pb[,-c(1:3)] <- cytek.data.pb[,-c(1:3)]/cytek.data.pb[,normalize.by]
+# only PB populations are further analyzed
+cytek.populations <- colnames(cytek.data.pb)
+cytek.populations <- cytek.populations[-c(1:which(cytek.populations == "Live CD19+"))]
+pb.flu.specific.populations <- grep("H3[+-]|HA",cytek.populations,value=T)
+
+cytek.pb.freq <- merge(subject.visit.info,cytek.data.pb,by=c("alt.subject.id","visit"),all.y=T)
+cat("Number of subjects:",length(unique(cytek.pb.freq$alt.subject.id)),"\n")
+table(cytek.pb.freq$visit)
+
+saveRDS(cytek.pb.freq,file.path(output.folder,paste0(output.prefix,"freq.as.prop.of.",normalize.by,".RDS")))
+
+cytek.pb.freq.under65 <- subset(cytek.pb.freq,age < 65)
+```
+
+#### Baseline differential analysis
+what are the differences at day 0 before flu vaccination?
+```{r baseline.model}
+baseline.cytek.pb.freq <- subset(cytek.pb.freq,visit == "Day 0")
+freq.w.offset <- add.dynamic.offset(baseline.cytek.pb.freq[,cytek.populations])
+baseline.model.fit <- baseline.condition.model(log2(t(freq.w.offset)),
+                                               baseline.cytek.pb.freq,random.effects = "batch")
+baseline.model.de.res <- model.term.statistics(baseline.model.fit,c("COVR.v.HC","COVR.male.v.female","COVR.m","COVR.f"))
+
+write.csv(baseline.model.de.res,
+          file.path(output.folder,paste0(output.prefix,"freq.as.prop.of.",normalize.by,".difference.at.baseline.csv")),row.names = F)
+```
+
+#### Association with time since diagnosis
+Are any of the cell frequencies associated with TSD at baseline?
+```{r tsd.asso.model}
+baseline.cytek.pb.freq.w.tsd <- subset(baseline.cytek.pb.freq,!is.na(covid.diagnosis.start.date.to.sample.drawn))
+
+tsd.model.fit <- baseline.tsd.association.model(t(apply(baseline.cytek.pb.freq.w.tsd[,cytek.populations],2,rank)),
+                                               baseline.cytek.pb.freq.w.tsd,random.effects = "batch")
+tsd.model.de.res <- model.term.statistics(tsd.model.fit,grep("TSD",colnames(tsd.model.fit$coefficients),value=T))
+write.csv(tsd.model.de.res,file.path(output.folder,paste0(output.prefix,"freq.as.prop.of.",normalize.by,".tsd.association.at.baseline.csv")),row.names = F)
+
+```
+
+#### Contrast vaccination timepoints with baseline
+Include only subjects < 65 years of age
+```{r timepoint.model}
+freq.w.offset <- add.dynamic.offset(cytek.pb.freq.under65[,cytek.populations])
+timepoint.model.fit <- timepoint.condition.model(log2(t(freq.w.offset)),
+                                                     cytek.pb.freq.under65,c("Day 0"),additional.fixed.effects = "batch")
+timepoint.model.de.res <- model.term.statistics(timepoint.model.fit,grep("^(Baseline|D7)",colnames(timepoint.model.fit$coefficients),value = T))
+timepoint.model.de.res[,c("visit","contrast")] <- do.call(rbind,sapply(timepoint.model.de.res$term,stringi::stri_split_fixed,pattern=".",n=2))
+write.csv(timepoint.model.de.res,
+          file.path(output.folder,paste0(output.prefix,"freq.as.prop.of.",normalize.by,".timepoint.diff.under65.csv")),row.names = F)
+```
+
+#### Visualization of PB Changes
+Fig. 2g
+```{r pb}
+cytek.pb.freq.under65$max.flu.specific.pb <- cytek.pb.freq.under65$`All HA+(CD20lowCD21low PB)`
+# recalculate as fraction of CD19+ B-cells
+cytek.pb.freq.under65$max.flu.specific.pb <- cytek.pb.freq.under65$max.flu.specific.pb/cytek.pb.freq.under65$`CD19+`
+cytek.pb.freq.under65$overall.group.visit <- factor(paste0(cytek.pb.freq.under65$group,"\n",gsub("Day ","D",cytek.pb.freq.under65$visit)),
+                                                    levels=c("HC\nD0","HC\nD7","COVR\nD0","COVR\nD7"))
+colors <- setNames(c(pal_nejm()(2),pal_jama()(2)),c("Female","Male","COVR","HC"))
+
+ggplot(cytek.pb.freq.under65,aes(overall.group.visit,1000*max.flu.specific.pb+.1)) + 
+  geom_boxplot(outlier.shape = NA,width=0.8,aes(color=group)) + 
+  geom_point(aes(color=sex,fill=sex),pch=21,size=0.5) + geom_line(aes(group=alt.subject.id,color=sex),alpha=0.8) +
+  stat_compare_means(comparisons = list(c(1,3),c(2,4)),label = "p.format",size=2.5) +
+  facet_grid(~sex) + theme_pubr() + scale_color_manual(values=colors) + scale_fill_manual(values=alpha(colors,0.4)) +
+  xlab("") + scale_y_continuous(trans="log10") + ylab(paste0("Flu-specific\nplasmablast frequency","\n(","per 1,000 B-cells",")")) +
+  theme(strip.background = element_blank(),legend.position = "none")
+ggsave(file.path(figure.folder,"Fig2g.pdf"),width=5.5,height=3)
+```
+
+####Session Info
+```{r}
+sessionInfo()
+```

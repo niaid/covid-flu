@@ -1,0 +1,185 @@
+---
+title: "D0_mono_acute_sig_heatmap"
+output: html_document
+date: "2023-01-10"
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(Biobase)
+library(limma)
+library(tidyverse)
+library(ComplexHeatmap)
+library(pheatmap)
+library(circlize)
+library(RColorBrewer)
+library(reshape2)
+```
+
+## Plot acute COVID related Mono signature genes for COVR Supplementray Figure 2a-2d
+using the genesets that are significanlty enriched during acute COVID in monocytes and see their difference in recovered patients
+input is output from filtered and normalized pseudobulk objects  
+Leading-edge genes from acute COVID data Liu et al, Cell, 2021: Antigen presentation sets, HALLMARK-Inflammatory response, HALLMARK-TNFa signaling via NF-kB; MS1 monocyte signature from Reyes et al,Sci. Transl. Med., 2021
+
+**Generate Supplementary Figure 2a-2d heatmaps**  
+Seurat object needs to be downloaded and put in data/ folder, pseudobulk lists generated using the pooling functions  
+
+```{r input}
+ # Generate pseudobulk lists and set parameters for pbulk input/output
+source("utils/heatmap_mono.R")
+DGELISTS_IN_PATH <- "output/CITE-seq/covid_flu.CITEseq.pseudobulk.gene.expr.filtered.RDS"
+pbulk_list <- readRDS(DGELISTS_IN_PATH)
+
+# read in geneset list from Acute COVID cohort
+geneset.list <- readRDS("data/LE_sets/kegg_go_btm_reactome_foointerferon.rds")
+# selected.pathways <- read.xlsx("data/LE_sets/pathway_summary.xlsx", sheet = "Sheet1")
+# Agpresets <- filter(selected.pathways, Category %in% c("Antigen presentation"))
+
+celltypes = c("Mono_Classical","Mono_NonClassical")
+Brescia.LElist <- list()
+for (i in celltypes) {
+  Brescia_mono_covid <- read.table(paste("data/other_datasets/acute_covid/", i, "--model@healthy_vs_covid--coef@COVID-Healthy--fgsea.tsv", sep = ""), header = TRUE, sep = "\t")
+  Brescia_mono_pc1 <- read.table(paste("data/other_datasets/acute_covid/", i, "--model@PC1--coef@PC1--fgsea.tsv", sep = ""), header = TRUE, sep = "\t")
+
+  mono_covid_Agpre <- Brescia_mono_covid %>% filter(pathway %in% c("reactome_Antigen processing-Cross presentation","reactome_MHC class II antigen presentation","KEGG_ANTIGEN_PROCESSING_AND_PRESENTATION"))
+  mono_covid_Agpre_LE <- unique(unlist(sapply(mono_covid_Agpre$leadingEdge, function(x) str_split(x, pattern = " "))))
+  mono_covid_NFkB <- Brescia_mono_covid %>% filter(pathway %in% c("HALLMARK_TNFA_SIGNALING_VIA_NFKB"))
+  mono_covid_NFkB_LE <- unique(unlist(sapply(mono_covid_NFkB$leadingEdge, function(x) str_split(x, pattern = " "))))
+  mono_covid_inflam <- Brescia_mono_covid %>% filter(pathway %in% c("HALLMARK_INFLAMMATORY_RESPONSE"))
+  mono_covid_inflam_LE <- unique(unlist(sapply(mono_covid_inflam$leadingEdge, function(x) str_split(x, pattern = " "))))
+  
+  ### MS1 signature from Reyes et al, Sci. Transl. Med. (2021)
+  MS1_module <- c("S100A8","VCAN","VIM","LGALS1","MNDA","CTSD","TIMP1","NCF1", "S100A12","LILRA5","SELL","MCEMP1","CLU","VAMP5","CYP1B1","CD163","ACSL1","SOD2", "ALOX5AP","CTSA","VNN2","IL1R2","STXBP2","NAMPT","CALR","PLAC8","ANXA6","LYZ","RETN","NKG7")
+  Brescia.LElist[[i]] <- list("mono_covid_Agpre_LE" = mono_covid_Agpre_LE, "mono_covid_inflam_LE" = mono_covid_inflam_LE, 
+                              "mono_covid_NFkB_LE" = mono_covid_NFkB_LE, "MS1_module" = MS1_module)
+}
+# repressed BTM-M4.0/M11.0 LE genes
+selected.reset.M4.M11 <- readRDS("data/LE_sets/mono.LE.and.reset.genesets.RDS")
+
+
+# parse and filter data to show interested timepoints/groups
+parse_meta <- function(dge){
+  filter <- colnames(dge$counts)[dge$samples$group %in% c("HC","COVR")]
+  dge <- dge[,filter]
+  dge$samples$Timepoint.sex.group <- paste(dge$samples$visit, 
+                                           dge$samples$sex, 
+                                           dge$samples$group, sep = ".")
+  dge$samples$Timepoint.group <- paste(dge$samples$visit, 
+                                       dge$samples$group, sep = ".")
+  dge$samples$sample_id <- sub(pattern = "-", replacement = ".",
+    sub(pattern = "ay ", replacement = "", x = paste(dge$samples$alt.subject.id, dge$samples$visit, sep = ".")))
+  
+  dge <- dge
+}
+
+eset_list <- lapply(pbulk_list, parse_meta)
+
+eset_list_group <- lapply(eset_list, function(dge){
+  filter <- colnames(dge$counts)[dge$samples$Timepoint.group %in% c("Day 0.HC","Day 0.COVR","Day 1.HC","Day 1.COVR","Day 28.HC","Day 28.COVR")]
+  dge$samples$Timepoint.group <- factor(dge$samples$Timepoint.group, levels = c("Day 0.HC","Day 0.COVR","Day 1.HC","Day 1.COVR","Day 28.HC","Day 28.COVR"))
+  dge$samples <- dge$samples[filter,]
+  dge$counts  <- dge$counts[,filter]
+  dge$normalizedExpr  <- dge$normalizedExpr[,filter]
+  dge <- dge
+})
+
+```
+
+
+## Heatmaps for classical monocytes  
+### showing the leading edge genes of acute COVID Bresica cohort mono classical antigen presentation  
+**Supplementary Figure 2a**  
+```{r heatmap_mc1, fig.width=10, fig.height=8.5}
+Mono_Classical <- eset_list_group$Mono_Classical
+# calculate mean for some duplicated samples
+Mono_Classical_exprs <- reshape2::melt(Mono_Classical$normalizedExpr) %>%
+  mutate(sample_id = str_extract(Var2, "(HC|COVR).+D\\d+")) %>% 
+  dplyr::group_by(Var1, sample_id) %>%
+  dplyr::summarise(exprs.mean = mean(value)) %>%
+  reshape2::dcast(Var1 ~ sample_id, value.var = "exprs.mean") %>%
+  column_to_rownames("Var1")
+Mono_Classical$normalizedExpr <- Mono_Classical_exprs
+Mono_Classical$samples <- distinct(Mono_Classical$samples, sample_id, .keep_all = TRUE)
+
+Mono_Classical.shared <- intersect(rownames(Mono_Classical$normalizedExpr), Brescia.LElist$Mono_Classical$mono_covid_Agpre_LE)
+Mono_Classical_mtx_Agpre <- Mono_Classical$normalizedExpr[Mono_Classical.shared, ]
+meta <- Mono_Classical$samples %>% dplyr::arrange(Timepoint.group, sex) %>%
+  filter(visit == "Day 0")
+Mono_Classical_mtx_Agpre <- Mono_Classical_mtx_Agpre[,meta$sample_id]
+
+HLA_sets <- c("HLA-B", "HLA-A", "HLA-G", "HLA-E","HLA-C", "HLA-DRB5", "HLA-DPB1", "HLA-DPA1", "HLA-DRA", "HLA-DRB1", "HLA-DQA1", "HLA-DQB1", "HLA-DMA", "HLA-DMB")
+HLA_sets <- Brescia.LElist$Mono_Classical$mono_covid_Agpre_LE[str_detect(Brescia.LElist$Mono_Classical$mono_covid_Agpre_LE, "HLA")]
+
+# what genes overlap with the BTM-M4.0/M11.0 immune receptor signature
+labelset <- c(intersect(Brescia.LElist$Mono_Classical$mono_covid_Agpre_LE, selected.reset.M4.M11$Mono_Classical$CITEseq.baseline.LE.Union.genesets$m.and.f.union))
+# pdf("figures/D0.Mono_Classical_BresciaAgpre_LE.supFig2a.pdf", width = 10, height = 8.5)
+subject.hm(exprs_mtx = Mono_Classical_mtx_Agpre, meta = meta, labelset = labelset, celltype = "Mono_Classical", 
+           module = "Antigen_presentation_LE", rowsplitLE = HLA_sets)
+# dev.off()
+
+```
+
+
+### Brescia inflammatory LE set
+**Supplementary Figure 2b**  
+```{r heatmap_mc2, fig.width=8, fig.height=3.2}
+### Brescia inflammatory LE set
+Mono_Classical.shared <- intersect(rownames(Mono_Classical$normalizedExpr), Brescia.LElist$Mono_Classical$mono_covid_inflam_LE)
+Mono_Classical_mtx_inflam <- Mono_Classical$normalizedExpr[Mono_Classical.shared, ]
+meta <- Mono_Classical$samples %>% dplyr::arrange(Timepoint.group, sex) %>%
+  filter(visit == "Day 0")
+Mono_Classical_mtx_inflam <- Mono_Classical_mtx_inflam[,meta$sample_id]
+
+# pdf("figures/D0.Mono_Classical_inflam_LE.supFig2b.pdf", width = 8, height = 3.2)
+subject.hm(exprs_mtx = Mono_Classical_mtx_inflam, meta = meta, labelset = Brescia.LElist$Mono_Classical$mono_covid_inflam_LE, celltype = "Mono_Classical", 
+           module = "inflam", rowsplitLE = Brescia.LElist$Mono_Classical$mono_covid_inflam_LE)
+# dev.off()
+
+```
+
+
+
+### Brescia TNFa signaling via NFkB LE set
+**Supplementary Figure 2c**  
+```{r heatmap_mc3, fig.width=8, fig.height=3.2}
+### Brescia NFkB LE set
+Mono_Classical.shared <- intersect(rownames(Mono_Classical$normalizedExpr), Brescia.LElist$Mono_Classical$mono_covid_NFkB_LE)
+Mono_Classical_mtx_NFkB <- Mono_Classical$normalizedExpr[Mono_Classical.shared, ]
+meta <- Mono_Classical$samples %>% dplyr::arrange(Timepoint.group, sex) %>%
+  filter(visit == "Day 0")
+Mono_Classical_mtx_NFkB <- Mono_Classical_mtx_NFkB[,meta$sample_id]
+
+# pdf("figures/D0.Mono_Classical_NFkB_LE.supFig2c.pdf", width = 8, height = 3.2)
+subject.hm(exprs_mtx = Mono_Classical_mtx_NFkB, meta = meta, labelset = Brescia.LElist$Mono_Classical$mono_covid_NFkB_LE, celltype = "Mono_Classical", 
+           module = "NFkB", rowsplitLE = Brescia.LElist$Mono_Classical$mono_covid_NFkB_LE)
+# dev.off()
+
+```
+
+### MS1 signature
+**Supplementary Figure 2d**  
+```{r heatmap_mc4, fig.width=8, fig.height=3.5}
+### MS1 signature
+Mono_Classical.shared <- intersect(rownames(Mono_Classical$normalizedExpr), Brescia.LElist$Mono_Classical$MS1_module)
+Mono_Classical_mtx_MS1 <- Mono_Classical$normalizedExpr[Mono_Classical.shared, ]
+meta <- Mono_Classical$samples %>% dplyr::arrange(Timepoint.group, sex) %>%
+  filter(visit == "Day 0")
+Mono_Classical_mtx_MS1 <- Mono_Classical_mtx_MS1[,meta$sample_id]
+
+# pdf("figures/D0.Mono_Classical_MS1_sig.supFig2d.pdf", width = 8, height = 3.5)
+subject.hm(exprs_mtx = Mono_Classical_mtx_MS1, meta = meta, labelset = Brescia.LElist$Mono_Classical$MS1_module, celltype = "Mono_Classical", 
+           module = "MS1-Top30-sig", rowsplitLE = Brescia.LElist$Mono_Classical$MS1_module)
+# dev.off()
+```
+
+
+SessionInfo  
+```{r}
+sI <- sessionInfo()
+utils:::print.sessionInfo(sI[-c(10,11)])
+```
+
+
+
+
+

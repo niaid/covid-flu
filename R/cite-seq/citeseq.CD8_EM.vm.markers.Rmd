@@ -1,0 +1,80 @@
+---
+title: "COVID Flu: CITE-seq GPR56 surface proteins in CD8 EM cells"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+### Import Seurat object
+```{r setup}
+library(knitr)
+library(dplyr)
+library(Seurat)
+source('R/utils/visualization.R')
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","CITE-seq")
+dir.create(output.folder)
+figure.folder <- "figures"
+dir.create(figure.folder)
+
+citeseq.obj <- readRDS(file.path("data","covid_flu.CITEseq.Seurat.obj.RDS"))
+citeseq.obj <- subset(citeseq.obj,subset = cell.type %in% c("CD8_EM","CD8_TEMRA"))
+citeseq.obj$GPR56.prot <- GetAssayData(citeseq.obj,assay = "CITE",slot = "data")["PROT-GPR56",]
+# divided into classes
+citeseq.obj$GPR56.prot.class <- ifelse(citeseq.obj$GPR56.prot > 1.5,"GPR56+","GPR56-")
+table(citeseq.obj$cell.type,citeseq.obj$GPR56.prot.class)
+```
+
+### VM-like surface protein markers
+```{r vm, fig.cap=c("Fig. 3g","ED Fig. 4f")}
+parameters.of.interest <- c("alt.subject.id","visit","group","sex","age","race","flu.vax.count.10yr","cell.type","GPR56.prot.class")
+
+adt <- GetAssayData(citeseq.obj, assay = "CITE", slot = "scale.data")
+adt <- cbind(citeseq.obj[[]][,parameters.of.interest],t(adt))
+adt.by.sample.and.GPR56.group <- as.data.frame(adt %>% group_by(across(all_of(parameters.of.interest))) %>% summarize_all(mean))
+cd8.em.adt.d0 <- subset(adt.by.sample.and.GPR56.group,visit == "Day 0" & cell.type == "CD8_EM")
+cd8.em.adt.d0 <- reshape2::melt(cd8.em.adt.d0,measure.vars=grep("PROT-",colnames(cd8.em.adt.d0)),variable.name="protein")
+
+vm.markers <- paste0("PROT-",c("CD5","CD27","CD45RA","CD45RO","CD94","CD122"))
+cd8.em.adt.d0.subset <- subset(cd8.em.adt.d0,protein %in% vm.markers)
+cd8.em.adt.d0.subset$GPR56.prot.class <- factor(cd8.em.adt.d0.subset$GPR56.prot.class,levels = c("GPR56+","GPR56-"))
+cd8.em.adt.d0.subset$protein <- factor(cd8.em.adt.d0.subset$protein,levels = vm.markers)
+ggplot(cd8.em.adt.d0.subset,aes(GPR56.prot.class,value)) + geom_boxplot(outlier.shape = NA,alpha=0.6,aes(fill=GPR56.prot.class)) + 
+  geom_jitter(aes(fill=GPR56.prot.class),width=0.2,height=0,color="white",pch=21,size=1.5,alpha=0.9) + 
+  facet_wrap(~protein,ncol=2) + scale_fill_manual(values=c("#8494FF","#66A182")) + 
+  stat_compare_means(comparisons = list(c(1,2)),size=2) + theme_bw() + scale_y_continuous(expand = c(0.05,0.2)) +
+  xlab("") + ylab("Expression level") + ggtitle("D0 VM-like CD8 memory surface\nprotein markers")
+ggsave(file.path(figure.folder,"Fig3g.pdf"),height=5.25,width=4.5)
+
+# add TEMRA cells
+adt.by.sample <- as.data.frame(adt %>% group_by(across(all_of(setdiff(parameters.of.interest,"GPR56.prot.class")))) %>% summarize_all(mean))
+cd8.temra.adt.d0 <- subset(adt.by.sample,visit == "Day 0" & cell.type %in% c("CD8_TEMRA"))
+cd8.temra.adt.d0 <- reshape2::melt(cd8.temra.adt.d0,measure.vars=grep("PROT-",colnames(cd8.temra.adt.d0)),variable.name="protein")
+cd8.temra.adt.d0.subset <- subset(cd8.temra.adt.d0,protein %in% vm.markers)
+cd8.temra.adt.d0.subset$cell.type <- gsub("_","\n",cd8.temra.adt.d0.subset$cell.type)
+
+cd8.em.adt.d0.subset$cell.type <- paste0("CD8 EM\n",cd8.em.adt.d0.subset$GPR56.prot.class)
+cd8.merged <- rbind(cd8.temra.adt.d0.subset[,c("cell.type","protein","value")],cd8.em.adt.d0.subset[,c("cell.type","protein","value")])
+cd8.merged$cell.type <- factor(cd8.merged$cell.type,levels=c("CD8 EM\nGPR56-","CD8 EM\nGPR56+","CD8\nTEMRA"))
+ggplot(subset(cd8.merged,protein %in% c("PROT-CD45RA","PROT-CD45RO")),aes(cell.type,value)) + geom_boxplot(outlier.shape = NA,alpha=0.6,aes(fill=cell.type)) + 
+  geom_jitter(aes(fill=cell.type),width=0.2,height=0,color="white",pch=21,size=1.5,alpha=0.9) + 
+  ggforce::facet_col(protein~.) + scale_fill_manual(values=c("#66A182","#8494FF","grey")) + 
+  stat_compare_means(comparisons = list(c(1,2),c(1,3),c(2,3)),size=3) + theme_bw(base_size = 10) + scale_y_continuous(expand = c(0.05,0.2)) +
+  xlab("") + ylab("Expression level") 
+ggsave(file.path(figure.folder,"ED.Fig4f.pdf"),height=4,width=3.25)
+```
+
+### Session Info
+```{r session}
+sessionInfo()
+```
+

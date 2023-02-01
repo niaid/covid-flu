@@ -1,0 +1,75 @@
+---
+title: "General_scUMAP"
+output: html_document
+date: "2022-12-14"
+---
+
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(Seurat)
+library(tidyverse)
+library(matrixStats)
+library(parallelDist)
+library(RColorBrewer)
+```
+
+## Generate the general umap for all single cells
+Download the Seurat object first and put it into input folder and read-in using the commented codes
+**Generate Figure 1e**
+
+```{r input_seurat}
+merge <- readRDS(file.path("data","covid_flu.CITEseq.Seurat.obj.RDS"))
+```
+
+
+```{r input_flow, fig.width=12, fig.height=8}
+merge$fig1_umap <- replace(merge$cell.type,
+                           !merge$cell.type %in% c("CD8_CM","CD8_EM","Mono_Classical","Mono_NonClassical"),
+                               "others")
+
+color_clusters1 <- c("Mono_Classical" = "#8C510A",
+                     "Mono_NonClassical" = "#00A087", 
+                     "CD8_CM" = "#A7B51C",
+                     "CD8_EM" = "#984EA3",
+                    "B_Naive" = "#9EBCDA",
+                    "CD4_Naive" = "#9EBCDA",
+                    "CD8_TEMRA"    = "#9EBCDA",
+                    "CD4_EM" = "#9EBCDA",
+                    "CD4_CM" = "#9EBCDA",
+                    "NK_CD56hiCD16lo" = "#9EBCDA",
+                    "cDC" = "#9EBCDA",        
+                    "CD4_Treg" = "#9EBCDA",
+                    "CD8_Naive" =  "#9EBCDA",       
+                    "Mac_or_Mono" = "#9EBCDA",
+                    "CD4_platelet_bind" = "#9EBCDA",   
+                    "Platelet" = "#9EBCDA",
+                    "NK_CD16hi" = "#9EBCDA",
+                    "B_Naive_Intermediate" = "#9EBCDA",
+                    "Mono_Intermediate" = "#9EBCDA",
+                    "MAIT" = "#9EBCDA", 
+                    "Mono_T_dblt" = "#9EBCDA",         
+                    "gdT_Vd2" = "#9EBCDA",
+                    "Neut" = "#9EBCDA", 
+                    "B_Mem" = "#9EBCDA",               
+                    "CD8_TRM" = "#9EBCDA",
+                    "pDC" = "#9EBCDA",
+                    "Plasmablast" = "#9EBCDA",         
+                    "CD4_Tfh" = "#9EBCDA",
+                    "HSPC" = "#9EBCDA",
+                    "CD8_proliferating" = "#9EBCDA",   
+                    "NK_proliferating" = "#9EBCDA",
+                    "ILC" = "#9EBCDA")
+
+# pdf("figures/ADTclust.umap.annotation.D0.fig1e.pdf", width = 10, height = 8)
+DimPlot(merge, pt.size = 0.1, reduction = "adt.umap", label=TRUE, raster = TRUE, group.by = "cell.type", repel = TRUE) + 
+  scale_color_manual(values=color_clusters1)+NoLegend()
+# dev.off()
+```
+
+
+```{r}
+sI <- sessionInfo()
+utils:::print.sessionInfo(sI[-c(10,11)])
+```
+
+

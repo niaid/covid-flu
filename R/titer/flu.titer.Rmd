@@ -1,0 +1,228 @@
+---
+title: "COVID Flu: Flu Titer"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+Tracking the titers of 4 flu strains pre- (D0) and post- (D28) flu vaccination
+```{r setup, message=FALSE}
+library(knitr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(SummarizedExperiment)
+library(emmeans)
+library(BiocParallel)
+param = SnowParam(32,"SOCK",progressbar = T)
+register(param)
+
+source('R/utils/dream.models.R')
+loadLibraries()
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","titer")
+output.prefix <- "flu.titer."
+dir.create(output.folder)
+figure.folder <- "figures"
+dir.create(figure.folder)
+```
+
+
+#### Import and transform data
+Convert titers outside of detection range into fixed values
+```{r transform}
+# Titer D0 and D28
+titer.data <- read.csv(file.path("data","covid_flu.influenza.antibody.titer.and.avidity.data.csv"),check.names = F,na.strings = "")
+titer.data <- titer.data[,1:6]
+titer.params <- colnames(titer.data)[3:6]
+titer.data <- titer.data[rowSums(is.na(titer.data[titer.params])) == 0,]
+
+# Subject info from RNA-Seq data
+rna.count.data <- readRDS(file.path("data","covid_flu.bulk.rna.count.data.RDS"))
+subject.visit.info <- as.data.frame(colData(rna.count.data))
+subject.visit.info <- unique(subject.visit.info[,1:10])
+subject.visit.info$group <- factor(subject.visit.info$group,levels = c("HC","COVR"))
+
+joined.data <- merge(subject.visit.info,titer.data,by=c("alt.subject.id","visit"))
+# change all < numbers to 10 and > numbers to 2600
+joined.data[,titer.params] <- apply(joined.data[,titer.params],2,function(x){x[grep("<",x)] <- "10";return(x)})
+joined.data[,titer.params] <- apply(joined.data[,titer.params],2,function(x){x[grep(">",x)] <- "2600";return(x)})
+joined.data[,titer.params] <- apply(joined.data[,titer.params],2,as.numeric)
+rownames(joined.data) <- paste0(joined.data$alt.subject.id,".",gsub("Day ","D",joined.data$visit))
+
+# max of scaled titer
+joined.data$max.scaled.log2.titer <- apply(scale(log2(joined.data[,titer.params])),1,max)
+joined.data$max.scaled.titer <- apply(scale(joined.data[,titer.params]),1,max)
+```
+
+#### D28/D0 Fold Change
+Only include subjects under 65 years of age
+```{r fc}
+joined.data.under65 <- subset(joined.data,age < 65)
+titer.fc <- calculate.fold.change(log2(t(joined.data.under65[,titer.params])),joined.data.under65,c("Day 0"))
+titer.fc <- round(t(2^titer.fc$fc[,grep("D28$",colnames(titer.fc$fc))]),10) # numerical instability
+titer.fc <- merge(joined.data[,1:10],titer.fc,by="row.names",suf=c("",".FC"))
+write.csv(titer.fc,file.path(output.folder,paste0(output.prefix,"d28.fold.change.csv")),row.names = F)
+```
+
+#### Modeling
+NB Model 1: FC ~ overall.group.sex + age + race + flu.vax.count.10yr + log2(D0.titer)
+log-normal Model 2: D28.titer ~ overall.group.sex + age + race + flu.vax.count.10yr + log2(D0.titer)
+based on FDA flu vaccine statistical analysis (e.g. page 27 of https://fda.gov/media/135687/download)
+```{r model}
+male.contrast <- "COVR.Male - HC.Male"
+female.contrast <- "COVR.Female - HC.Female"
+cat("Negative binomial model:\n")
+fc.model.res <- data.frame()
+model.data <- merge(subset(joined.data.under65,visit == "Day 0"),titer.fc[,c("alt.subject.id",titer.params)],by="alt.subject.id",suf=c(".D0",".FC"))
+model.data$overall.group.sex <- paste0(model.data$group,".",model.data$sex)
+for (i in titer.params) {
+  model.data$D0.titer <- model.data[,paste0(i,".D0")]
+  model.data$FC <- model.data[,paste0(i,".FC")]
+  lm.res <- MASS::glm.nb(FC ~ overall.group.sex + age + race + flu.vax.count.10yr + log(D0.titer),model.data)
+  em <- emmeans(lm.res, ~ overall.group.sex)
+  fc.model.res <- rbind(fc.model.res,cbind(strain = i,as.data.frame(pairs(em,adjust="none"))))
+}
+cat("Contrast:",male.contrast,"\n")
+subset(fc.model.res,contrast == male.contrast)
+
+cat("Contrast:",female.contrast,"\n")
+subset(fc.model.res,contrast == female.contrast)
+write.csv(subset(fc.model.res,contrast %in% c(male.contrast,female.contrast)),
+          file.path(output.folder,paste0(output.prefix,"FC.model.res.csv")))
+
+cat("log-normal model:\n")
+baseline.titer.model.res <- data.frame()
+d28.titer.model.res <- data.frame()
+model.data <- merge(subset(joined.data.under65,visit == "Day 0"),
+                    subset(joined.data.under65,visit == "Day 28")[,c("alt.subject.id",titer.params,"max.scaled.log2.titer")],by="alt.subject.id",suf=c(".D0",".D28"))
+model.data$overall.group.sex <- paste0(model.data$group,".",model.data$sex)
+for (i in c(titer.params,"max.scaled.log2.titer")) {
+  # baseline
+  model.data$titer.D0 <- model.data[,paste0(i,".D0")]
+  if (i == "max.scaled.log2.titer") {
+    lm.res <- lm(titer.D0 ~ overall.group.sex + age + race,model.data)
+  } else {
+    lm.res <- lm(log10(titer.D0) ~ overall.group.sex + age + race,model.data)
+  }
+  em <- emmeans(lm.res, ~ overall.group.sex)
+  baseline.titer.model.res <- rbind(baseline.titer.model.res,cbind(strain = i,as.data.frame(pairs(em,adjust="none"))))
+  
+  # day 28
+  model.data$titer.D28 <- model.data[,paste0(i,".D28")]
+  if (i == "max.scaled.log2.titer") {
+    lm.res <- lm(titer.D28 ~ overall.group.sex + age + race + flu.vax.count.10yr + titer.D0,model.data)
+  } else {
+    lm.res <- lm(log10(titer.D28) ~ overall.group.sex + age + race + flu.vax.count.10yr + log10(titer.D0),model.data)
+  }
+  em <- emmeans(lm.res, ~ overall.group.sex)
+  d28.titer.model.res <- rbind(d28.titer.model.res,cbind(strain = i,as.data.frame(pairs(em,adjust="none"))))
+}
+write.csv(subset(baseline.titer.model.res,contrast %in% c(male.contrast,female.contrast)),
+          file.path(output.folder,paste0(output.prefix,"D0.model.res.csv")))
+
+cat("Contrast:",male.contrast,"\n")
+subset(d28.titer.model.res,contrast == male.contrast)
+
+cat("Contrast:",female.contrast,"\n")
+subset(d28.titer.model.res,contrast == female.contrast)
+write.csv(subset(d28.titer.model.res,contrast %in% c(male.contrast,female.contrast)),
+          file.path(output.folder,paste0(output.prefix,"D28.model.res.csv")))
+```
+
+#### FC Plots
+```{r fc.plot,fig.cap=c("Fig. 2h","Fig. 2i")}
+geo.mean <- function(x){exp(mean(log(x)))}
+# geometric mean of fold change
+gmfr <- titer.fc %>% group_by(group,sex) %>% summarise_at(.vars=titer.params,geo.mean)
+# individual strain FC
+titer.fc.melted <- reshape2::melt(titer.fc,measure.vars = titer.params,variable.name = "strain")
+
+colors <- setNames(c(alpha(pal_nejm()(2),0.3),pal_jama()(2)),c("Female","Male","COVR","HC"))
+plots <- list()
+for (s in unique(titer.fc.melted$sex)) {
+  model.stat <- subset(fc.model.res,contrast == paste0("COVR.",s," - HC.",s))
+  model.stat$strain <- gsub(".","/",model.stat$strain,fixed=T)
+  model.stat$group1 <- factor("HC",levels = c("HC","COVR"))
+  model.stat$group2 <- factor("COVR",levels = c("HC","COVR"))
+  model.stat$y.position <- 5.5
+  model.stat$p.value <- round(model.stat$p.value,3)
+  
+  plots[[s]] <- ggplot(subset(titer.fc.melted,sex == s),aes(group,value)) + 
+          geom_dotplot(binaxis = "y",stackdir="center",binwidth = 0.1,dotsize = 1.5,stackratio = 0.8,aes(fill=sex,color=NA)) +
+          stat_summary(fun = mean, fun.min = mean, fun.max = mean, geom = "crossbar",width = 0.75,alpha=0.7,aes(color=group,fill=group)) +
+          stat_pvalue_manual(data=model.stat,label = "p.value",xmin = "group1",xmax="group2",y.position = "y.position",size=3) +
+          scale_y_continuous(trans = "log2",limits = c(NA,56))  +
+          facet_grid(.~strain) + theme_pubr() + ylab("D28/D0 titer FC") + 
+          scale_color_manual(values=colors) + scale_fill_manual(values=colors) + 
+          scale_alpha_manual(values=c(0.4,0.9)) + 
+          theme(strip.text = element_text(size=6,face = "bold"),
+                strip.background = element_rect(fill=NA,color=NA),
+                text = element_text(size=9),legend.position = "none") +
+          ggtitle(s) + xlab("")
+}
+plots[["Female"]]
+ggsave(file.path(figure.folder,"Fig2h.pdf"),width=5.25,height=2.5)
+plots[["Male"]]
+ggsave(file.path(figure.folder,"Fig2i.pdf"),width=5.25,height=2.5)
+
+```
+
+#### Titer Plots
+```{r titer.plots,fig.cap=c("ED Fig. 3e","ED Fig. 3f","ED Fig. 3g")}
+joined.data.under65.melted <- reshape2::melt(joined.data.under65[,c("alt.subject.id","visit","group","sex",titer.params,"max.scaled.log2.titer")],
+                                             variable.name="strain")
+# baseline titers
+plots <- list()
+for (s in unique(joined.data.under65.melted$sex)) {
+  model.stat <- subset(baseline.titer.model.res,contrast == paste0("COVR.",s," - HC.",s) & strain != "max.scaled.log2.titer")
+  model.stat$group1 <- factor("HC",levels = c("HC","COVR"))
+  model.stat$group2 <- factor("COVR",levels = c("HC","COVR"))
+  model.stat$y.position <- 3.8
+  model.stat$p.value <- round(model.stat$p.value,3)
+  
+  plots[[s]] <- ggplot(subset(joined.data.under65.melted,visit == "Day 0" & sex == s & strain != "max.scaled.log2.titer"),aes(group,value)) + 
+          geom_boxplot(outlier.shape = NA,width=0.8,aes(color=group)) + 
+          geom_dotplot(binaxis = "y",stackdir="center",dotsize = 1,aes(color=sex,fill=sex)) +
+          stat_pvalue_manual(data=model.stat,label = "p.value",xmin = "group1",xmax="group2",y.position = "y.position",size=3) +
+          scale_y_continuous(trans = "log10",limits = c(NA,10000)) +           
+          scale_fill_manual(values=alpha(colors,0.4)) + scale_color_manual(values=colors) +
+          theme_classic() + ggtitle(s) + ylab("D0 MN Titers") + xlab("") + facet_grid(.~strain) + 
+          theme(strip.text = element_text(size=9,face="bold"),strip.background = element_blank())
+}
+plots[["Female"]]
+ggsave(file.path(figure.folder,"ED.Fig3e.pdf"),width=7,height=3)
+plots[["Male"]]
+ggsave(file.path(figure.folder,"ED.Fig3f.pdf"),width=7,height=3)
+
+# D28 max titer
+model.stat <- subset(d28.titer.model.res,contrast %in% c(male.contrast,female.contrast) & strain == "max.scaled.log2.titer")
+model.stat$group1 <- factor("HC",levels = c("HC","COVR"))
+model.stat$group2 <- factor("COVR",levels = c("HC","COVR"))
+model.stat$sex <- ifelse(model.stat$contrast == male.contrast,"Male","Female")
+model.stat$y.position <- 2.9
+model.stat$p.value <- round(model.stat$p.value,3)
+  
+ggplot(subset(joined.data.under65.melted,visit == "Day 28" & strain == "max.scaled.log2.titer"),aes(group,value)) + 
+    geom_boxplot(outlier.shape = NA,aes(color=group)) +
+    geom_dotplot(binaxis = "y",stackdir="center",alpha=0.65,dotsize = 1,binwidth = 0.1,aes(fill=sex)) +
+    stat_pvalue_manual(data=model.stat,label = "p.value",xmin = "group1",xmax="group2",y.position = "y.position",size=3) +
+    scale_color_manual(values=colors) + scale_fill_manual(values=colors) + ylim(NA,3) + facet_grid(~sex) +
+    theme_classic() + ylab("D28 max. standardized titers") + xlab("")
+ggsave(file.path(figure.folder,"ED.Fig3g.pdf"),width=5,height=3)
+
+```
+
+#### Session Info
+```{r session}
+sessionInfo()
+```

@@ -1,0 +1,181 @@
+---
+title: "COVID Flu: Whole Blood RNA-Seq DE and GSE Analysis"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+Run DE and TSD analysis with latent variables and neutrophil counts from CBC/TBNK as co-variates
+```{r setup, message=F}
+library(knitr)
+library(edgeR)
+library(dplyr)
+library(clusterProfiler)
+library(SummarizedExperiment)
+library(variancePartition)
+library(BiocParallel)
+library(doParallel)
+param = SnowParam(32,"SOCK",progressbar = F)
+register(param)
+registerDoParallel()
+
+source('R/utils/dream.models.R')
+loadLibraries()
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","rna-seq")
+dir.create(output.folder)
+output.prefix <- "bulk.rna."
+```
+
+### Import Data
+```{r import}
+# rna-seq data
+# normalized
+#normalized.rna.data <- readRDS(file.path("output","rna-seq","covid_flu.normalized.rna.data.RDS"))
+normalized.rna.data <- readRDS(file.path("data","covid_flu.normalized.rna.data.RDS"))
+normalized.geneExpr <- assays(normalized.rna.data)$seqRUV.norm.count
+rownames(normalized.geneExpr) <- rowData(normalized.rna.data)[rownames(normalized.geneExpr),]$symbol
+
+# raw
+raw.rna.data <- readRDS(file.path("data","covid_flu.bulk.rna.count.data.RDS"))
+# subset to genes that passed filtering
+geneExpr <- assays(raw.rna.data)$counts[rownames(normalized.rna.data),colnames(normalized.rna.data)]
+cat("Number of genes to consider:",nrow(geneExpr),"\n")
+
+# sample metadata
+sample.info <- as.data.frame(colData(normalized.rna.data))
+sample.info$overall.group.sex <- interaction(sample.info$group,sample.info$sex)
+cat("Number of subjects:",length(unique(sample.info$subject.id)),"\n")
+table(sample.info$visit)
+num.latent.var <- length(grep("W_",colnames(sample.info)))
+cat("Number of latent variables:",num.latent.var,"\n")
+
+# geneset data
+gene.signatures.gmt <- readRDS(file.path("data","gene.signatures.gmt.RDS"))
+
+# TBNK Data
+tbnk.data <- read.csv(file.path("data","covid_flu.cbc.tbnk.data.csv"),check.names = F)
+sample.info <- merge(sample.info,tbnk.data[,c("alt.subject.id","visit",grep("\\(%\\)$",colnames(tbnk.data),value=T))],
+                     by=c("alt.subject.id","visit"),all.x=T)
+rownames(sample.info) <- paste0("P",sample.info$library.plate,".",sample.info$library.well)
+
+additional.covar <- c(paste0("W_",1:num.latent.var),"`Neutrophils % of Parent (%)`")
+```
+
+### TSD Association 
+```{r tsd.association}
+baseline.samples.w.tsd <- subset(sample.info,visit %in% c("Day -7","Day 0") & !is.na(covid.diagnosis.start.date.to.sample.drawn))
+baseline.samples.w.tsd$TSD <- scale(baseline.samples.w.tsd$covid.diagnosis.start.date.to.sample.drawn)
+
+model <- as.formula(paste0("~ sex + sex:TSD + age + race + ",
+                            paste0(additional.covar,collapse = " + ")," + (1|alt.subject.id)"))
+vobjDream <- voomWithDreamWeights(geneExpr[,rownames(baseline.samples.w.tsd)], model, baseline.samples.w.tsd )
+
+# transform to rank
+vobjDream.rank <- vobjDream
+vobjDream.rank$E <- t(scale(apply(t(vobjDream$E),2,rank),center=T,scale=F))
+tsd.model.fit <- baseline.tsd.association.model(vobjDream.rank,
+                                               baseline.samples.w.tsd,additional.fixed.effects = additional.covar)
+tsd.model.de.res <- model.term.statistics(tsd.model.fit,grep("TSD",colnames(tsd.model.fit$coefficients),value=T))
+tsd.model.de.res$gene.symbol <- rowData(normalized.rna.data)[tsd.model.de.res$parameter,]$symbol
+write.csv(tsd.model.de.res,file.path(output.folder,paste0(output.prefix,"pre.vax.tsd.association.gene.csv")),row.names = F)
+```
+
+### Pre-vaccination Model
+Using a combination of Day -7 and Day 0 samples, what are the differences before flu vaccination?
+```{r pre.vax.model}
+baseline.samples <- subset(sample.info,visit %in% c("Day -7","Day 0"))
+model <- as.formula(paste0("~ 0 + overall.group.sex + age + race + ",
+                           paste0(additional.covar,collapse = " + ")," + (1|alt.subject.id)"))
+vobjDream <- voomWithDreamWeights(geneExpr[,rownames(baseline.samples)], model, baseline.samples)
+# remove lowly expressed genes
+maxExpr <- apply(vobjDream$E,1,max)
+vobjDream <- vobjDream[maxExpr >= 2,]
+
+visit.groups <- list("Pre-Vaccination"=c("Day -7","Day 0"),"Day -7"=c("Day -7"),"Day 0"=c("Day 0"))
+baseline.model.de.res <- data.frame()
+baseline.gsea.res <- data.frame()
+for (days in 1:length(visit.groups)) {
+  include.samples <- subset(sample.info,visit %in% visit.groups[[days]])
+
+  vobjDream.filtered <- subsetListOfArrays(vobjDream,j=rownames(include.samples),I = NA,IJ=c("E","weights"),JX=c("targets"))
+  pre.vax.model.fit <- baseline.condition.model(vobjDream.filtered,include.samples,
+                                                 additional.fixed.effects = additional.covar)
+  pre.vax.model.de.res <- model.term.statistics(pre.vax.model.fit,
+                                                 grep("male.v.female$|COVR.v.HC$|COVR.[mf]$",colnames(pre.vax.model.fit$coefficients),value=T))
+  pre.vax.model.de.res$gene.symbol <- rowData(normalized.rna.data)[pre.vax.model.de.res$parameter,]$symbol
+  baseline.model.de.res <- rbind(baseline.model.de.res,cbind(visit=names(visit.groups[days]),pre.vax.model.de.res))
+
+  # GSEA
+  pre.vax.gsea.res <- run.gsea(pre.vax.model.de.res,gene.signatures.gmt)
+  baseline.gsea.res <- rbind(baseline.gsea.res,cbind(visit=names(visit.groups[days]),pre.vax.gsea.res))
+}
+
+write.csv(baseline.model.de.res,file.path(output.folder,paste0(output.prefix,"baseline.gene.csv")),row.names = F)
+write.csv(baseline.gsea.res,file.path(output.folder,paste0(output.prefix,"baseline.gsea.csv")),row.names = F)
+```
+
+Run the model with only subjects under 65 years of age
+```{r under65.de}
+# Additionally, run pre-Vaccination group DE analysis for subjects under 65 y.o. (to compare with Flu Infection cohort)
+include.samples <- subset(sample.info,visit %in% c("Day -7","Day 0") & age < 65)
+
+vobjDream.filtered <- subsetListOfArrays(vobjDream,j=rownames(include.samples),I = NA,IJ=c("E","weights"),JX=c("targets"))
+pre.vax.model.fit <- baseline.condition.model(vobjDream.filtered,include.samples,
+                                                 additional.fixed.effects = additional.covar)
+pre.vax.model.de.res <- model.term.statistics(pre.vax.model.fit,
+                                                 grep("male.v.female$|COVR.v.HC$|COVR.[mf]$",colnames(pre.vax.model.fit$coefficients),value=T))
+pre.vax.model.de.res$gene.symbol <- rowData(normalized.rna.data)[pre.vax.model.de.res$parameter,]$symbol
+write.csv(pre.vax.model.de.res,file.path(output.folder,paste0(output.prefix,"baseline.gene.under65.csv")),row.names = F)
+```
+
+### Post-vaccination model
+Use both Day -7 and Day 0 samples as baseline; include only subjects under 65 y.o.
+
+Remove TSD associated genes from GSEA
+```{r post.vax.model}
+tsd.asso.genes <- unique(subset(tsd.model.de.res,term != "TSD.male.v.female" & P.Value < 0.05)$parameter)
+
+include.samples <- subset(sample.info,!is.na(flu.vax.count.10yr) & age < 65)
+include.samples$visit.overall.group.sex <- make.names(interaction(include.samples$visit,include.samples$group,include.samples$sex))
+
+model <- as.formula(paste0("~ 0 + visit.overall.group.sex + age + race + flu.vax.count.10yr + ",
+                           paste0(additional.covar,collapse = " + ")," + (1|alt.subject.id)"))
+vobjDream <- voomWithDreamWeights(geneExpr[,rownames(include.samples)], model, include.samples )
+timepoint.model.fit <- timepoint.condition.model(vobjDream,
+                                                    include.samples,c("Day -7","Day 0"),additional.fixed.effects = additional.covar)
+# timepoint group diff
+timepoint.v.baseline.de.res <- model.term.statistics(timepoint.model.fit,
+                                                grep("sex.diff$|COVR.v.HC$|COVR.[mf]$|sub.baseline$|[^f].v.baseline",
+                                                     colnames(timepoint.model.fit$coefficients),value = T))
+timepoint.v.baseline.de.res$gene.symbol <- rowData(normalized.rna.data)[timepoint.v.baseline.de.res$parameter,]$symbol
+timepoint.v.baseline.de.res[,c("visit","contrast")] <- do.call(rbind,sapply(timepoint.v.baseline.de.res$term,
+                                                                            stringi::stri_split_fixed,pattern=".",n=2))
+write.csv(timepoint.v.baseline.de.res,file.path(output.folder,paste0(output.prefix,"vaccine.response.gene.under65.csv")),row.names = F)
+
+#GSEA
+# for reproducibility of published results, run contrasts separately
+# exclude tsd associated genes
+timepoint.v.baseline.gsea.res.1 <- run.gsea(subset(timepoint.v.baseline.de.res[grep("v.baseline",timepoint.v.baseline.de.res$term,invert = T),],
+                                                 !(parameter %in% tsd.asso.genes)),gene.signatures.gmt)
+timepoint.v.baseline.gsea.res.2 <- run.gsea(subset(timepoint.v.baseline.de.res[grep("v.baseline",timepoint.v.baseline.de.res$term,invert = F),],
+                                                 !(parameter %in% tsd.asso.genes)),gene.signatures.gmt)
+timepoint.v.baseline.gsea.res <- rbind(timepoint.v.baseline.gsea.res.1,timepoint.v.baseline.gsea.res.2)
+timepoint.v.baseline.gsea.res[,c("visit","contrast")] <- do.call(rbind,sapply(timepoint.v.baseline.gsea.res$term,
+                                                                              stringi::stri_split_fixed,pattern=".",n=2))
+write.csv(timepoint.v.baseline.gsea.res,file.path(output.folder,paste0(output.prefix,"vaccine.response.gsea.wo.TSD.genes.under65.csv")),row.names = F)
+```
+
+### Session Info
+```{r session}
+sessionInfo()
+```

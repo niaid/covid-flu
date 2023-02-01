@@ -1,0 +1,101 @@
+---
+title: "COVID Flu: CITE-seq DE and GSE Analysis"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+### Import data
+```{r setup, message=F}
+library(knitr)
+library(edgeR)
+library(dplyr)
+library(clusterProfiler)
+library(SummarizedExperiment)
+library(variancePartition)
+library(BiocParallel)
+library(doParallel)
+param = SnowParam(32,"SOCK",progressbar = F)
+register(param)
+registerDoParallel()
+
+source('R/utils/dream.models.R')
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+
+output.folder <- file.path("output","CITE-seq")
+dir.create(output.folder)
+
+# cite-seq pbulk data
+pseudobulk.list.filtered <- readRDS(file.path(output.folder,"covid_flu.CITEseq.pseudobulk.gene.expr.filtered.RDS"))
+cat("Cell subsets:",names(pseudobulk.list.filtered))
+
+# geneset data
+gene.signatures.gmt <- readRDS(file.path("data","gene.signatures.gmt.RDS"))
+# remove Monaco genesets
+gene.signatures.gmt <- subset(gene.signatures.gmt,source != "Monaco 2019")
+
+# cohort subject IDs
+subject.IDs <- read.csv(file.path("data","cohort.subject.IDs.txt"),header = F)
+```
+
+### Post-vaccine Model
+What are the differences after flu vaccination for each cell type?
+
+To reproduce the published results, this script needs to be run using the same packages as listed in the session info and 
+the subject IDs need to be ordered the same way as the internal IDs used
+```{r vaccine.response}
+# remove doublets
+cell.types <- grep("_dblt|^dblt",names(pseudobulk.list.filtered),invert = T,value=T)
+dir.create(file.path(output.folder,"DEA"))
+dir.create(file.path(output.folder,"GSEA"))
+for (i in cell.types) {
+  tryCatch({
+    cat(i,"-\n")
+    samples <- pseudobulk.list.filtered[[i]]
+    geneExpr <- samples$counts
+    sample.info <- samples$samples
+    include.samples <- subset(sample.info,alt.subject.id != "Control")
+    include.samples$visit.overall.group.sex <- as.character(include.samples$visit.overall.group.sex)
+    include.samples$alt.subject.id <- factor(include.samples$alt.subject.id,subject.IDs[,1]) # to reproduce the published results
+    samples <- samples[,rownames(include.samples)]
+    
+    if (sum(table(include.samples$visit.overall.group.sex) > 0) > 1) {
+      model <- as.formula(paste0("~ 0 + visit.overall.group.sex + age + race + flu.vax.count.10yr + n_barcodes + (1|Batch) + (1|alt.subject.id)"))
+      vobjDream <- voomWithDreamWeights(samples, model, include.samples,plot=F)
+
+      # using D0 only as pre-vax baseline
+      timepoint.model.fit <- timepoint.condition.model(vobjDream,
+                                                    include.samples,c("Day 0"),additional.random.effects = "Batch",additional.fixed.effects = "n_barcodes")
+      # timepoint group diff
+      timepoint.model.de.res <- model.term.statistics(timepoint.model.fit,
+                                                grep("sex.diff$|COVR.v.HC$|COVR.[mf]$|sub.baseline$|[^f].v.baseline",
+                                                     colnames(timepoint.model.fit$coefficients),value = T))
+      colnames(timepoint.model.de.res)[2] <- "gene.symbol"
+      timepoint.model.de.res[,c("visit","contrast")] <-  
+        do.call(rbind,sapply(timepoint.model.de.res$term,stringi::stri_split_fixed,pattern=".",n=2))
+      write.csv(cbind(cell.type=i,timepoint.model.de.res),
+                file.path(output.folder,"DEA",paste0("pseudobulk.",make.names(i),".vaccine.response.gene.csv")),row.names = F)
+      
+      # GSEA
+      cell.type.gsea.res <- run.gsea(timepoint.model.de.res,gene.signatures.gmt)
+      write.csv(cbind(cell.type=i,cell.type.gsea.res),
+                file.path(output.folder,"GSEA",paste0("pseudobulk.",make.names(i),".vaccine.response.gsea.csv")),row.names = F)
+    }
+  },error=function(err_msg){message(err_msg)})
+}
+```
+
+### Session Info
+```{r session}
+sessionInfo()
+```
+

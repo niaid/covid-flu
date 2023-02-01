@@ -1,0 +1,145 @@
+---
+title: "D1vsD0_IFNG_response_score_umap"
+output: html_document
+date: "2023-01-03"
+---
+
+```{r setup, message=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(Seurat)
+library(tidyverse)
+library(matrixStats)
+library(parallelDist)
+library(RColorBrewer)
+library(reshape2)
+library(viridis)
+library(ggrastr)
+```
+
+## Generate the HALLMARK-IFNg response score D1 change and plot on umap for all subsets
+Download the Seurat object first and put it into input folder and read-in using the commented codes
+**Generate Figure 2d**
+
+```{r input_seurat}
+merge <- readRDS(file.path("data","covid_flu.CITEseq.Seurat.obj.RDS"))
+merge$Timepoint.sex.group <- paste(merge$visit, merge$sex, merge$group,
+                                       sep = ".")
+# input IFNG genesets
+geneset.list <- readRDS("data/LE_sets/kegg_go_btm_reactome_foointerferon.rds")
+hallmark_ifng <- geneset.list$HALLMARK_INTERFERON_GAMMA_RESPONSE #200 genes
+```
+  
+add module score
+```{r add_score}
+DefaultAssay(merge) <- "RNA"
+merge <- AddModuleScore(merge,
+                        features = list(intersect(hallmark_ifng, rownames(merge@assays$RNA))), name="hallmark.IFNg")
+```
+  
+  
+Subset cells in each group (to have equal cell#) to visualize in UMAP  
+```{r subset}
+# get the embeddings for plots
+merge.embed <- data.frame(Embeddings(merge@reductions$adt.umap)) %>% rownames_to_column("barcode")
+identical(merge.embed$barcode, colnames(merge))
+merge.embed$hallmark.IFNg.score <- merge$hallmark.IFNg1
+
+merge.embed$Timepoint.sex.group <- merge$Timepoint.sex.group
+merge.embed$visit <- merge$visit
+merge.embed$sex <- merge$sex
+merge.embed$group <- merge$group
+merge.embed$Timepoint.group <- paste(merge$visit, merge$group, sep = ".")
+merge.embed$cell.type <- merge$cell.type
+merge.embed$coarse.cell.type <- merge$coarse.cell.type
+merge.embed$sex.group <- paste(merge$sex, merge$group, sep = ".")
+
+Timepoint.sex.group.selected = c("Day 0.Female.HC", "Day 0.Female.COVR",
+                                 "Day 1.Female.HC", "Day 1.Female.COVR",
+                                 "Day 0.Male.HC", "Day 0.Male.COVR",
+                                 "Day 1.Male.HC", "Day 1.Male.COVR")
+merge.embed <- merge.embed %>% 
+  filter(Timepoint.sex.group %in% Timepoint.sex.group.selected) %>%
+  mutate("Timepoint.sex.group" = factor(Timepoint.sex.group, levels = Timepoint.sex.group.selected)) %>%
+  mutate("Timepoint.group" = factor(Timepoint.group, levels = c("Day 0.HC","Day 0.COVR", "Day 1.HC", "Day 1.COVR")))
+
+# downsample to have same number of cells each group
+table(merge.embed$Timepoint.sex.group)
+set.seed(12345)
+merge.embed.ds <- data.frame()
+for (i in Timepoint.sex.group.selected){
+  tmp <- filter(merge.embed, Timepoint.sex.group == i)
+  tmp <- tmp[sample(rownames(tmp), 
+         size = 25000, 
+         replace=F), ]
+  merge.embed.ds <- rbind(merge.embed.ds, tmp)
+}
+# calculate zscore for each cluster
+merge.embed.ds <- merge.embed.ds %>%
+  dplyr::group_by(cell.type) %>%
+  mutate(hallmark.IFNg.zscore = scale(hallmark.IFNg.score))
+
+# dir.create("data/data_frame", recursive = TRUE)
+# saveRDS(merge.embed.ds, "data/data_frame/IFNg.score.embed.ds.rds")
+```
+  
+  
+Calculate D1 vs D0 IFNG score change (D1-D0) for each cell subset 
+```{r cal_D1vsD0}
+# merge.embed.ds <- readRDS("data/data_frame/IFNg.score.embed.ds.rds")
+merge.embed.ds.mean <- reshape2::dcast(merge.embed.ds, 
+                             cell.type+coarse.cell.type ~ Timepoint.sex.group,
+                             value.var = "hallmark.IFNg.zscore", fun.aggregate = mean) %>%
+  mutate(Female.HC = `Day 1.Female.HC` - `Day 0.Female.HC`,
+         Male.HC = `Day 1.Male.HC` - `Day 0.Male.HC`,
+         Female.COVR = `Day 1.Female.COVR` - `Day 0.Female.COVR`,
+         Male.COVR = `Day 1.Male.COVR` - `Day 0.Male.COVR`)
+merge.embed.ds.mean <- reshape2::melt(merge.embed.ds.mean[,c(1,2,11:14)],
+                                      id.vars = c("cell.type","coarse.cell.type"),
+                                      variable.name = "sex.group",
+                                      value.name = "D1vsD0")
+merge.embed.ds.D1 <- filter(merge.embed.ds, visit == "Day 1") %>%
+  mutate(sex.group = paste(sex, group, sep = ".")) %>%
+  left_join(merge.embed.ds.mean[,c("cell.type","sex.group","D1vsD0")], by = c("cell.type","sex.group")) %>%
+  mutate(sex.group = factor(sex.group, levels = c("Female.HC","Female.COVR", "Male.HC","Male.COVR")))
+
+```
+
+Plots
+```{r plots, fig.width=10, fig.height=9}
+facet_names <- list(
+  'Female.HC'="HC-F",
+  'Female.COVR'="COVR-F",
+  'Male.HC'="HC-M",
+  'Male.COVR'="COVR-M"
+)
+facet_labeller <- function(variable,value){
+  return(facet_names[value])
+}
+label.df <- data.frame(coarse.cell.type=unique(merge.embed.ds.D1$coarse.cell.type),label=unique(merge.embed.ds.D1$coarse.cell.type))
+label.df_2 <- merge.embed.ds.D1 %>% 
+  group_by(coarse.cell.type) %>% 
+  summarize(UMAP_1 = mean(UMAP_1), UMAP_2 = mean(UMAP_2)) %>% 
+  left_join(label.df, by = "coarse.cell.type")
+
+breaks = c(0,0.2,0.4,0.6)
+p <- ggplot(merge.embed.ds.D1, aes(x = UMAP_1, y = UMAP_2, color = D1vsD0)) +
+  ggrastr::geom_point_rast(size=0.4, alpha = 0.5)+
+  scale_color_gradientn(limits = c(0,0.6),colours = c("grey95","blue"), breaks=breaks,
+                        labels=format(breaks), oob = scales::squish)+
+  facet_wrap(~sex.group, ncol = 2, labeller=facet_labeller) +
+  ggrepel::geom_text_repel(data = label.df_2, aes(label = label), color = "black", size = 4.5) +
+  theme_bw(base_size = 20)+
+  labs(color = "D1 vs D0 \nmodule score")+
+  ggtitle("HALLMARK IFNg response module score: D1-D0")
+p
+ggsave("figures/ifng.score.umap.fig2d.pdf",p, device = "pdf", width = 10, height = 9)
+```
+
+
+```{r}
+sI <- sessionInfo()
+utils:::print.sessionInfo(sI[-c(10,11)])
+```
+
+
+

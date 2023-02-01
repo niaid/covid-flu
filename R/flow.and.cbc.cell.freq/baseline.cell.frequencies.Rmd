@@ -96,11 +96,11 @@ merged.baseline.melted <- reshape2::melt(merged.baseline,
 # monocytes
 pop <- "Monocytes % of Parent (%)"
 tsd.scatter.plot(subset(merged.baseline.melted,parameter == pop),"value") + ylab(pop) + theme(aspect.ratio = 1)
-ggsave(file.path(figure.folder,"ED.Fig.1c.pdf"),width=3.75,height=2.5)
+ggsave(file.path(figure.folder,"ED.Fig1c.pdf"),width=3.75,height=2.5)
 # DCs
 pop <- "CD11c+DCs"
 tsd.scatter.plot(subset(merged.baseline.melted,parameter == pop),"value") + ylab(pop) + theme(aspect.ratio = 1)
-ggsave(file.path(figure.folder,"ED.Fig.1d.pdf"),width=3.75,height=2.5)
+ggsave(file.path(figure.folder,"ED.Fig1d.pdf"),width=3.75,height=2.5)
 ```
 
 #### Session Info

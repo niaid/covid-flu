@@ -140,7 +140,7 @@ cd8.em.GPR56hi.samples <- pseudobulk.list.normalized[["CD8_EM:GPR56hi"]]$samples
 cd8.em.GPR56hi.samples$IFNG <- pseudobulk.list.normalized[["CD8_EM:GPR56hi"]]$normalizedExpr["IFNG",]
 overall.group.visit.change.boxplot(subset(cd8.em.GPR56hi.samples,visit %in% c("Day 0","Day 1")),"IFNG",subset(IFNG.pval.df,cell.type == "CD8_EM:GPR56hi")) +
   ylab("GPR56+ CD8 EM\nIFNG expression") + xlab("")
-ggsave(file.path(output.folder,"ED.Fig4c.pdf"),width=5.75,height=3)
+ggsave(file.path(figure.folder,"ED.Fig4c.pdf"),width=5.75,height=3)
 
 cd8.em.GPR56lo.samples <- pseudobulk.list.normalized[["CD8_EM:GPR56lo"]]$samples
 cd8.em.GPR56lo.samples$IFNG <- pseudobulk.list.normalized[["CD8_EM:GPR56lo"]]$normalizedExpr["IFNG",]

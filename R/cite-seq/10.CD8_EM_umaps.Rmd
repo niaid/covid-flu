@@ -1,0 +1,110 @@
+---
+title: "CD8_EM_umaps"
+output: html_document
+date: "2023-01-06"
+---
+
+```{r setup, message=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(Seurat)
+library(tidyverse)
+library(matrixStats)
+library(parallelDist)
+library(ggpubr)
+library(rstatix)
+```
+
+## CD8 effector memory cell cluster and signature score calculation  
+Add module score to CD8 cells and cluster CD8 effector memory for plotting  
+
+**Generate Figure 3c-3f**  
+
+```{r input_seurat}
+merge <- readRDS(file.path("data","covid_flu.CITEseq.Seurat.obj.RDS"))
+CD8 <- subset(merge, subset = coarse.cell.type %in% c("CD8"))
+CD8$visit.sex.group <- paste(CD8$visit, CD8$sex, CD8$group,
+                             sep = ".")
+# input signature gene sets
+# IFNgsets from Nicolet et al, Proc Natl Acad Sci U S A, 2020
+# bystander sets from Bergamaschi et al, Immunity, 2021
+# genesets from the paper and filtered by the pseudobulk filtered genes in this dataset
+IFNgsets <- readRDS("data/other_datasets/CD8_IFNg_secreting_signature_pbulkgenes.rds")
+GSE13738_BYSTANDER <- readRDS("data/other_datasets/Bergamaschi_et_al_bystander_CD8_covid_pbulkgenes.rds")
+```
+
+  
+Add module score and clustering CD8-EM cells using CITE variable features  
+```{r module_score}
+# add module score
+DefaultAssay(CD8) <- "RNA"
+CD8 <- AddModuleScore(CD8, features = list(GSE13738_BYSTANDER$GSE13738_BYSTANDER_DN), 
+                      nbin = 20, name="GSE13738_BYSTANDER_DN")
+CD8 <- AddModuleScore(CD8, features = list(GSE13738_BYSTANDER$GSE13738_BYSTANDER_UP),
+                      nbin = 20, name="GSE13738_BYSTANDER_UP")
+CD8 <- AddModuleScore(CD8, features = list(IFNgsets$DE_CD29hi_CD8_genes),
+                      nbin = 20, name="CD8.CD29hi.DE")
+# add GPR56 level
+CD8$GPR56_level = ifelse(CD8@assays$CITE@data["PROT-GPR56",] > 1.5, "GPR56+", "GPR56-")
+
+# cluster based on CITE variable features
+# cluster using top PCs
+CD8_EM <- subset(CD8, subset = cell.type == "CD8_EM")
+CD8_EM <- FindVariableFeatures(CD8_EM, assay = "CITE", nfeatures = 60)
+CD8_EM <- ScaleData(CD8_EM, assay = "CITE")
+CD8_EM <- RunPCA(CD8_EM, assay="CITE")
+DefaultAssay(CD8_EM) <- "CITE"
+CD8_EM <- FindNeighbors(CD8_EM, reduction = "pca", dims = 1:15, nn.eps = 1)
+CD8_EM <- FindClusters(CD8_EM, resolution = c(0.5), algorithm = 1)
+CD8_EM <- RunUMAP(CD8_EM, assay = "CITE", features = CD8_EM@assays$CITE@var.features, n.neighbors=30L, min.dist = 0.3)
+# DimPlot(CD8_EM, pt.size = 0.2, reduction = "umap", label=TRUE, raster = FALSE) + 
+#   scale_color_manual(values=color_clusters)
+```
+
+  
+UMAP plots for GPR56 expression and signature scores  
+**Fig 3c-3f umaps**  
+
+```{r umap, fig.width = 5, fig.height = 11.5}
+CD8_EM.d0 <- subset(CD8_EM, subset = visit %in% c("Day 0"))
+# pdf("figures/CD8_EM.GPR56.bystander.score.feature.D0.fig3cdf.pdf", width = 5, height = 11.5)
+p1 <- FeaturePlot(CD8_EM.d0, reduction = "umap",
+                  features = c("GSE13738_BYSTANDER_UP1"), cols = c("gray90", "blue"),label = FALSE, min.cutoff = "q10", max.cutoff = "q95", pt.size = 0.5, label.size = 6)
+p2 <- FeaturePlot(CD8_EM.d0, reduction = "umap",
+                  features = c("CD8.CD29hi.DE1"), cols = c("gray90", "blue"),label = FALSE, min.cutoff = "q10", max.cutoff = "q95", pt.size = 0.5, label.size = 6)
+p3 <- FeaturePlot(CD8_EM.d0, reduction = "umap",
+                  features = c("PROT-GPR56"), cols = c("gray90", "black"),label = FALSE, min.cutoff = "q05", max.cutoff = "q95", pt.size = 0.5, label.size = 6)
+p3+p2+p1
+# dev.off()
+```
+
+  
+Density plots for GPR56 expression and signature scores  
+**Fig 3d, 3f density plots**  
+
+```{r density, fig.width = 5, fig.height = 2.5}
+tmp <- CD8_EM.d0@meta.data %>%
+  mutate(GPR56 = CD8_EM.d0@assays$CITE@data["PROT-GPR56",])
+tmp$GSE13738_BYSTANDER_UP_level <- ifelse(tmp$GSE13738_BYSTANDER_UP1 > median(CD8_EM$GSE13738_BYSTANDER_UP1), "bystander.score_high", "bystander.score_low")
+
+stat.test1 <- wilcox.test(tmp$CD8.CD29hi.DE1 ~ tmp$GPR56_level)
+stat.test2 <- wilcox.test(tmp$GSE13738_BYSTANDER_UP1 ~ tmp$GPR56_level)
+print("CD29hi IFNg secreting score stat test between GPR56- vs GPR56+")
+stat.test1
+print("By stander activation score stat test between GPR56- vs GPR56+")
+stat.test2
+# pdf("figures/GPR56_level_signature_scores_Fig3df.pdf", width = 4, height = 2)
+p3 <- ggpubr::ggdensity(tmp,x = "CD8.CD29hi.DE1",color="GPR56_level",
+                  add="median",fill="GPR56_level",palette = c("#66A182","#8494FF"))+geom_text(aes(x=5, y=1.5, label="p < 2.2e-16"))
+p4 <- ggpubr::ggdensity(tmp,x = "GSE13738_BYSTANDER_UP1",color="GPR56_level",
+                  add="median",fill="GPR56_level",palette = c("#66A182","#8494FF"))+geom_text(aes(x=0.35, y=6, label="p < 2.2e-16"))
+p3
+p4
+# dev.off()
+```
+
+  
+```{r}
+sI <- sessionInfo()
+utils:::print.sessionInfo(sI[-c(10,11)])
+```
+

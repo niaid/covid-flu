@@ -1,0 +1,193 @@
+---
+title: "COVID Flu: CITE-Seq Innate Immune Receptor (IIR) Signature"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+Run a 20-round bootstrap test to determine whether the number of reset genes is significantly different COVR-F and COVR-M
+
+#### Setup
+```{r setup,message=FALSE}
+library(ggplot2)
+library(knitr)
+library(dplyr)
+library(BiocParallel)
+library(doParallel)
+param = SnowParam(32,"SOCK",progressbar = T)
+register(param)
+registerDoParallel()
+options(future.globals.maxSize = 120 * 1024 ^3)
+source('R/utils/visualization.R')
+source('R/utils/dream.models.R')
+loadLibraries()
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","CITE-seq")
+dir.create(output.folder)
+figure.folder <- "figures"
+dir.create(figure.folder)
+
+# subject list
+subject.IDs <- read.csv(file.path("data","cohort.subject.IDs.txt"),header = F)[,1]
+
+# cite-seq pbulk data
+pseudobulk.list.filtered <- readRDS(file.path(output.folder,"covid_flu.CITEseq.pseudobulk.gene.expr.filtered.RDS"))
+cat("Cell subsets:",names(pseudobulk.list.filtered))
+
+# genesets and celltypes of interest
+wb.genesets <- c("enriched in monocytes (II) (M11.0)","cell cycle and transcription (M4.0)")
+mono.subsets <- c("Mono_Classical","Mono_NonClassical")
+
+dea.files <- list.files(file.path(output.folder,"DEA"),pattern = "vaccine.response.gene",full.names = T)
+cite_de_model_results <- do.call(rbind,lapply(dea.files[grep(paste0(mono.subsets,collapse = "|"),dea.files)],read.csv))
+gsea.files <- list.files(file.path(output.folder,"GSEA"),pattern = "vaccine.response.gsea",full.names = T)
+gsea.results <- do.call(rbind,lapply(gsea.files[grep(paste0(mono.subsets,collapse = "|"),gsea.files)],read.csv))
+
+# IIR Signature
+overall.cell.type.genesets <- readRDS(file.path(output.folder,"mono.LE.and.reset.genesets.RDS"))
+```
+
+#### Monocyte IIR Signature
+Genes from IIR signature in mono subsets
+```{r IIR.sig}
+mono.samples <- subset(pseudobulk.list.filtered$Mono_Classical$samples,!is.na(visit))
+mono.samples$sample.id <- rownames(mono.samples)
+# to ensure the subjects are ordered the same way as the original IDs used so the same set of samples would be drawn in each round of the bootstrapping
+mono.samples$alt.subject.id <- factor(mono.samples$alt.subject.id,levels=subject.IDs) 
+mono.samples.subjects <- unique(mono.samples[,c("alt.subject.id","group","sex")])
+mono.samples.subjects$overall.group.sex <- factor(paste0(mono.samples.subjects$group,"-",mono.samples.subjects$sex),
+                                                  levels = c("COVR-Female","HC-Female","COVR-Male","HC-Male"))
+
+IIR.sig <- "CITEseq.baseline.LE.Union.genesets"
+
+# prepare the variancePartition object for the bootstrapping
+model <- as.formula(paste0("~ 0 + visit.overall.group.sex + age + race + flu.vax.count.10yr + n_barcodes + (1|Batch) + (1|alt.subject.id)"))
+celltype.vobj <- list()
+for (cell.type in c("Mono_Classical","Mono_NonClassical")) {
+  samples <- pseudobulk.list.filtered[[cell.type]]
+  include.samples <- samples$samples[]
+  
+  vobjDream <- voomWithDreamWeights(samples, model, include.samples,plot=T)
+  celltype.vobj[[cell.type]] <- vobjDream
+}
+```
+
+#### Bootstrapping
+Bootstrap cohort of subjects
+
+Reset genes are defined as those with smaller COVR vs baseline HC effect size at D1 and D28 compared to D0
+```{r bootstrap}
+num.rounds <- 20
+overall.response.model.de.res <- data.frame()
+for (i in 1:num.rounds) {
+  cat("Round",i,"\n")
+  set.seed(i)
+  # select subjects from each group
+  selected.subjects <- mono.samples.subjects %>% group_by(overall.group.sex) %>% slice_sample(prop=1,replace=T)
+  # differentiate duplicates
+  mono.samples.subset <- do.call(rbind,lapply(1:nrow(selected.subjects),
+                                              function(x) {
+                                                tmp <- subset(mono.samples,alt.subject.id == selected.subjects$alt.subject.id[x])
+                                                tmp$index <- x
+                                                return(tmp)}))
+  # only 1 sample from replicates
+  mono.samples.subset <- as.data.frame(mono.samples.subset %>% group_by(alt.subject.id,index,visit) %>% slice_sample(n=1))
+  mono.samples.subset$alt.subject.id <- paste0(mono.samples.subset$alt.subject.id,".",mono.samples.subset$index)
+  rownames(mono.samples.subset) <- make.unique(mono.samples.subset$sample.id)
+  
+  for (cell.type in names(celltype.vobj)) {
+    tryCatch({
+      cat(cell.type,"-\n")
+      genes <- overall.cell.type.genesets[[cell.type]][[IIR.sig]][["m.and.f.union"]]  # union LEGs
+      
+      vobjDream <- celltype.vobj[[cell.type]]
+      vobjDream.round <-subsetListOfArrays(vobjDream,j=mono.samples.subset$sample.id,i=genes,I=NA,IX=c(),IJ=c("E","weights"),JX=c("targets"))
+      colnames(vobjDream.round$E) <- rownames(vobjDream.round$targets) 
+      
+      # using D0 only as pre-vax baseline
+      timepoint.model.fit <- timepoint.condition.model(vobjDream.round,mono.samples.subset,c("Day 0"),
+                                                       additional.random.effects = "Batch",additional.fixed.effects = "n_barcodes")
+      # timepoint group diff
+      timepoint.model.de.res <- model.term.statistics(timepoint.model.fit,
+                                                      grep("Baseline.COVR.[mf]$|v.baseline.HC.[mf]$",
+                                                           colnames(timepoint.model.fit$coefficients),value = T))
+      
+      overall.response.model.de.res <- rbind(overall.response.model.de.res,cbind(round=i,celltype=cell.type,timepoint.model.de.res))
+      
+    },error=function(err_msg){message(err_msg)})
+  }
+}
+saveRDS(overall.response.model.de.res,file.path(output.folder,"mono.sig.bootstrapping.DE.res.RDS"))
+```
+
+#### Distribution of reversal genes
+Fraction of genes that reset in each round
+
+To have bootstrapped p-values exactly identical to the numbers reported in the paper, the published alt.subject.id need to be ordered  
+the same way as the internal IDs used when generating the figure, so that the same samples are drawn in each round of bootstrapping.
+```{r reset,fig.cap="Fig. 4e"}
+overall.response.model.de.res[,c("visit","contrast")] <-  
+        do.call(rbind,sapply(overall.response.model.de.res$term,stringi::stri_split_fixed,pattern=".",n=2))
+overall.response.model.de.res$sex <- "Female"
+overall.response.model.de.res[grep(".m$",overall.response.model.de.res$contrast),"sex"] <- "Male"
+
+reset.stat <- data.frame()
+for (s in unique(overall.response.model.de.res$sex)) {
+  for (cell.type in unique(overall.response.model.de.res$celltype)) {
+    res <- subset(overall.response.model.de.res,sex == s & celltype == cell.type)
+    res <- reshape2::dcast(res,round + parameter ~ visit,value.var = "z.std")
+    res$D1.reset <- abs(res$Baseline) > abs(res$D1)
+    res$D28.reset <- abs(res$Baseline) > abs(res$D28)
+    res$reset <- res$D1.reset & res$D28.reset
+    # only sex-specific LEGs
+    mono.sig.LE.genes <- overall.cell.type.genesets[[cell.type]][[IIR.sig]][[s]]
+    res <- subset(res,parameter %in% mono.sig.LE.genes)
+    
+    num.reset <- as.data.frame(res %>% group_by(round) %>% summarise(reset.count=sum(reset)))
+    num.reset$proportion.reset <- num.reset$reset.count/length(mono.sig.LE.genes)
+    reset.stat <- rbind(reset.stat,cbind(celltype=cell.type,sex=s,num.LEG=length(mono.sig.LE.genes),num.reset))
+  }
+}
+
+# calculate mean, 95% confidence intervals, and wilcox test p values
+reset.stat.summary <- data.frame()
+wilcox.test.res <- data.frame()
+for (i in unique(reset.stat$celltype)) {
+  test.res <- wilcox.test(subset(reset.stat,celltype == i & sex == "Male")$proportion.reset,
+                          subset(reset.stat,celltype == i & sex == "Female")$proportion.reset)
+  wilcox.test.res <- rbind(wilcox.test.res,cbind(celltype=i,p=sprintf("%.1e",test.res$p.value),"group1"="Male","group2"="Female"))
+  for (j in unique(reset.stat$sex)) {
+    l.model <- lm(proportion.reset ~ 1,subset(reset.stat,celltype == i & sex == j))
+    model.summary <- summary(l.model)
+    model.res <- as.data.frame(confint(l.model,level=0.95))
+    model.res$mean <- model.summary$coefficients[,"Estimate"]
+    reset.stat.summary <- rbind(reset.stat.summary,cbind(celltype=i,sex=j,model.res))
+  }
+}
+colnames(reset.stat.summary)[3:4] <- c("low","high")
+
+ggplot(reset.stat.summary, aes(x = sex, y = mean)) +
+    geom_point(aes(color=sex)) + geom_errorbar(aes(ymin=low,ymax=high,color=sex),width=.3) +
+    scale_color_manual(values = c("Female"="#BD3B29", "Male"="#0472B6"))+
+    scale_fill_manual(values = c("Female"="#BD3B29", "Male"="#0472B6"))+
+    stat_pvalue_manual(wilcox.test.res,y.position = 0.5) +
+    facet_grid(~celltype) + scale_y_continuous(limits = c(0.15,0.7)) +
+    theme_light(base_size = 11) + ylab("Proportion of LEGs moved towards baseline HC") + xlab("") +
+  scale_x_discrete(limits=rev) + coord_flip() 
+ggsave(file.path(figure.folder,"Fig4e.pdf"),width=5,height=2)
+```
+
+#### Session Info
+```{r session}
+sessionInfo()
+```
+

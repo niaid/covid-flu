@@ -1,0 +1,103 @@
+---
+title: "COVID Flu: Whole-blood and serum IFNG Day 1 increase"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+IFNG bulk gene expression and serum protein 
+```{r setup, message=F}
+library(knitr)
+library(dplyr)
+library(ggplot2)
+library(SummarizedExperiment)
+source('R/utils/visualization.R')
+source('R/utils/dream.models.R')
+loadLibraries()
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","multimodal")
+dir.create(output.folder)
+figure.folder <- "figures"
+dir.create(figure.folder)
+
+# Subject data within RNA-Seq data
+#normalized.rna.data <- readRDS(file.path("output","rna-seq","covid_flu.normalized.rna.data.RDS"))
+normalized.rna.data <- readRDS(file.path("data","covid_flu.normalized.rna.data.RDS"))
+
+# gene signatures
+gene.signature.gmt <- readRDS(file.path("data","gene.signatures.gmt.RDS"))
+gene.signature.list <- aggregate(gene.signature.gmt$gene,list(gene.signature.gmt$ont),paste0)
+names(gene.signature.list$x) <- make.names(gene.signature.list$Group.1)
+gene.signature.list <- gene.signature.list$x
+
+# olink data
+olink.data <- readRDS(file.path("data","covid_flu.OLINK.proteomics.data.RDS"))
+```
+
+#### IFNg gene signature
+Using the HALLMARK_INTERFERON_GAMMA_RESPONSE geneset
+```{r ifng.sig,fig.cap="Fig. 2b"}
+baseline.timepoints <- "Day 0"
+ifng.geneset.name <- "HALLMARK_INTERFERON_GAMMA_RESPONSE"
+demo.params <- c("alt.subject.id","visit","sex","group","age","race","flu.vax.count.10yr","covid.diagnosis.start.date.to.sample.drawn")
+
+# calculate module scores
+normalized.expr.batch.effect.filtered <- assays(normalized.rna.data)$seqRUV.norm.count
+rownames(normalized.expr.batch.effect.filtered) <- rowData(normalized.rna.data)[rownames(normalized.expr.batch.effect.filtered),]$symbol
+sample.signature.scores <- GSVA::gsva(normalized.expr.batch.effect.filtered,gene.signature.list[ifng.geneset.name],parallel.sz=1,min.sz=5)
+
+ifng.expr.signature <- as.data.frame(cbind(colData(normalized.rna.data)[,demo.params],t(sample.signature.scores)))
+ifng.expr.signature.fc <- calculate.fold.change(t(ifng.expr.signature[,c(ifng.geneset.name,"flu.vax.count.10yr")]),
+                                                ifng.expr.signature,baseline.timepoints)
+ifng.expr.signature[,paste0("fc.",ifng.geneset.name)] <- ifng.expr.signature.fc$fc[ifng.geneset.name,
+                                                                                       rownames(ifng.expr.signature)]
+
+# merge replicates
+ifng.expr.signature.mean <- as.data.frame(ifng.expr.signature %>% group_by(across(all_of(demo.params))) %>% 
+  summarise_at(.vars = grep(ifng.geneset.name,colnames(ifng.expr.signature),value=T),mean))
+saveRDS(ifng.expr.signature.mean,file.path(output.folder,"bulk.IFNG.sig.scores.and.fc.RDS"))
+
+overall.group.sex.boxplot(subset(ifng.expr.signature.mean,visit == "Day 1" & age < 65),paste0("fc.",ifng.geneset.name)) + 
+  ylab(paste0("Day 1 - ",paste0(baseline.timepoints,collapse = "/")," module score")) + ggtitle("Whole blood")
+ggsave(file.path(figure.folder,"Fig2b.pdf"),width=3,height=3)
+```
+
+#### Serum IFNg protein
+```{r ifng.protein,fig.cap="Fig. 2c"}
+# olink proteins
+olink.sample.info <- as.data.frame(colData(olink.data))
+proteinExpr <- assays(olink.data)$count
+proteinExpr.imputed <- impute::impute.knn(proteinExpr)$data
+# merge probes for the same gene/protein
+proteinExpr.imputed <- aggregate(proteinExpr.imputed,list(as.data.frame(rowData(olink.data))$Gene),mean)
+rownames(proteinExpr.imputed) <- proteinExpr.imputed$Group.1
+proteinExpr.imputed <- proteinExpr.imputed[,-1]
+
+olink.sample.info$IFN.gamma.protein <- as.numeric(proteinExpr.imputed["IFNG",rownames(olink.sample.info)])
+ifng.fc <- calculate.fold.change(t(olink.sample.info[,c("flu.vax.count.10yr","IFN.gamma.protein")]),
+                                 olink.sample.info,baseline.timepoints)
+olink.sample.info$fc.IFN.gamma.protein <- ifng.fc$fc["IFN.gamma.protein",rownames(olink.sample.info)]
+
+# merge replicates
+olink.sample.info.mean <- as.data.frame(olink.sample.info %>% group_by(across(all_of(demo.params))) %>% 
+  summarise_at(.vars = grep("IFN",colnames(olink.sample.info),value=T),mean))
+saveRDS(olink.sample.info.mean,file.path(output.folder,"serum.IFNG.protein.level.and.fc.RDS"))
+
+overall.group.sex.boxplot(subset(olink.sample.info.mean,visit == "Day 1" & age < 65),"fc.IFN.gamma.protein") + 
+  ylab(paste0("D1 - ",paste0(baseline.timepoints,collapse = "/")," IFNg level")) + ggtitle("Serum")
+ggsave(file.path(figure.folder,"Fig2c.pdf"),width=3,height=3)
+```
+
+#### Session Info
+```{r}
+sessionInfo()
+```

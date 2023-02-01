@@ -1,0 +1,126 @@
+---
+title: "D0_pseudobulk_blscore_mono"
+output: html_document
+date: "2023-01-02"
+---
+
+```{r setup, message=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(edgeR)
+library(GSVA)
+library(tidyverse)
+library(Biobase)
+library(reshape2)
+library(ggpubr)
+library(readr)
+```
+
+## Get GSVA score of the filtered pseudobulk objects for Fig 1f-1g
+using LE genes from single cell pseudobulk dream model  
+Mono baseline (D0, covid-healthy) BTM-M4.0/M11.0 innate immune receptor signature  
+input is output from filtered and normalized pseudobulk objects  
+**Generate Figure 1f-1g boxplots**  
+Seurat object needs to be downloaded and put in data/ folder, pseudobulk lists generated using the pooling functions  
+
+```{r input}
+# Generate pseudobulk lists and set parameters for pbulk input/output
+DGELISTS_IN_PATH <- "output/CITE-seq/covid_flu.CITEseq.pseudobulk.gene.expr.filtered.RDS"
+OUT_DIR <- "output/pbulk/gsva/"
+dir.create(OUT_DIR, recursive = TRUE)
+
+# input LE sets from dream model
+selected.reset.M4.M11 <- readRDS("data/LE_sets/mono.LE.and.reset.genesets.RDS")
+pbulk_list <- readRDS(DGELISTS_IN_PATH)
+
+# list of expression data by cell type
+eset_list <- lapply(pbulk_list, function(dge){
+  mat <- dge$normalizedExpr
+  meta <- dge$samples
+  ExpressionSet(assayData = mat, phenoData = AnnotatedDataFrame(meta))
+})
+
+eset_list_mono <- eset_list[c("Mono_Classical", "Mono_NonClassical")]
+```
+  
+Calculate module scores
+```{r cal_score}
+scores_list <- lapply(1:length(eset_list_mono), function(eset){
+  cat(names(eset_list_mono)[eset],"\n")
+  celltype.gsea.res <- selected.reset.M4.M11[[names(eset_list_mono)[eset]]]$CITEseq.baseline.LE.Union.genesets
+  # if (nrow(celltype.gsea.res) > 0) {
+  module.scores <- gsva(expr = eset_list_mono[[eset]], gset.idx.list = celltype.gsea.res, method = "gsva", parallel.sz = 16, min.sz = 5)
+  return(cbind(reshape2::melt(exprs(module.scores)),celltype= names(eset_list_mono)[eset]))
+  # }
+})
+
+module.scores.df <- do.call("rbind",scores_list)
+colnames(module.scores.df) <- c("geneset","sample","module.score","celltype")
+# add meta data and transform the dataframe into esetlist
+meta <- pbulk_list$Mono$samples[,c("alt.subject.id", "age", "Batch","visit","sex","race","group","flu.vax.count.10yr","vaccine.side.effects","long.covid.symptoms", "visit.overall.group.sex")] 
+meta$sample <- rownames(meta)
+meta$sample_id <- paste(meta$alt.subject.id, meta$visit.overall.group.sex, sep = ".")
+
+# add other info
+module.scores.df$geneset_celltype <- paste0(module.scores.df$geneset,"--",module.scores.df$celltype)
+module.scores.df <- left_join(module.scores.df, 
+                              meta,
+                              by=c("sample"))
+write.csv(module.scores.df, file.path(OUT_DIR, "module_score_gsva_filtered_samples_genes_df.Mono.M4M11.baseline.csv"))
+```
+  
+Boxplots of module scores
+```{r boxplot, fig.width=17, fig.height=6}
+# module.scores.df <- read.csv(paste0(OUT_DIR, "module_score_gsva_filtered_samples_genes_df.Mono.M4M11.baseline.csv"), row.names = 1)
+module.scores.df$age <- NULL
+module.scores.df$group.timepoint <- paste(module.scores.df$group, module.scores.df$visit, sep = ".")
+module.scores.df$group.timepoint <- factor(module.scores.df$group.timepoint, levels = c("HC.Day 0","HC.Day 1","HC.Day 28","COVR.Day 0","COVR.Day 1","COVR.Day 28"))
+module.scores.df$sample_id <- paste(module.scores.df$alt.subject.id, module.scores.df$visit.overall.group.sex, sep = ".")
+
+# calculate mean for some duplicated samples
+meta.sample <- meta[,c("sample_id","alt.subject.id", "visit", "sex", "race", "group", "flu.vax.count.10yr", "vaccine.side.effects", "long.covid.symptoms", "visit.overall.group.sex")] %>%
+  distinct() %>%
+  filter(alt.subject.id != "Control")
+module.scores.df.sample <- module.scores.df %>% group_by(celltype, geneset, sample_id) %>%
+  dplyr::summarise(module.score.mean = mean(module.score)) %>%
+  inner_join(meta.sample, by=c("sample_id"))
+
+module.scores.df.sample <- filter(module.scores.df.sample, visit == "Day 0") %>%
+  mutate(sex.group = factor(paste(sex, group, sep = "."), levels = c("Female.HC","Female.COVR","Male.HC","Male.COVR"))) %>%
+  mutate(group = factor(group, levels = c("HC","COVR")) )
+module.scores.df.fm <- module.scores.df.sample %>%
+  mutate(sex.geneset = paste(sex, geneset, sep = "."),
+         celltype.sex = paste(celltype, sex, sep = ".")) %>%
+  filter(sex.geneset %in% c("Female.Female", "Male.Male"))
+
+# pdf("output/female.module.score.Mono.M4M11.baseline.fig1fg.pdf", width = 8, height = 6)
+
+my_comparisons1 <- list( c("HC", "COVR"))
+  
+# covid vs healthy
+p <- ggplot(module.scores.df.fm, aes(x = group, y = module.score.mean)) +
+    geom_boxplot(aes(fill=sex,color=sex), alpha = 0.4, width = 0.3, outlier.shape = NA)+
+    geom_point(aes(fill=sex), shape = 21, color = "white", size = 4, position = position_jitterdodge(dodge.width = 0.9, jitter.width = 0.1)) +
+    scale_color_manual(values = c("Female"="#BD3B29", "Male"="#0472B6"))+
+    scale_fill_manual(values = c("Female"="#BD3B29", "Male"="#0472B6"))+
+    stat_compare_means(comparisons = my_comparisons1, method = "wilcox.test", size = 8, label.y = round(max(module.scores.df.fm$module.score.mean)+0.03,digits = 1))+
+    facet_wrap(~celltype.sex, scale = "free", ncol = 5) +
+    ylim(c(min(module.scores.df.fm$module.score.mean), max(module.scores.df.fm$module.score.mean)+0.2))+
+    theme_bw(base_size = 26)
+p
+
+# dev.off()
+```
+
+
+
+```{r}
+sI <- sessionInfo()
+utils:::print.sessionInfo(sI[-c(10,11)])
+```
+
+
+
+
+
+
+

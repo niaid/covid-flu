@@ -1,0 +1,65 @@
+---
+title: "D0D1_scdotplot_AgPre_Mono"
+output: html_document
+date: "2023-01-04"
+---
+
+```{r setup, message=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(Seurat)
+library(tidyverse)
+library(matrixStats)
+library(parallelDist)
+library(RColorBrewer)
+```
+
+## Generate the single cell dotplot plot for Antigen presentation genesets Leading-edge genes for classical monocytes  
+Download the Seurat object first and put it into data folder and read-in using the commented codes  
+Leading edge genes from dream model, D1.covid.m.sub.baseline term, indicating D1 COVR-M change differences after accounting for baseline COVR-M vs. HC-M  
+Antigen presentation genesets:  
+BTM-enriched in antigen presentation (I) (M71)  
+BTM-enriched in antigen presentation (II) (M95.0)  
+
+**Generate Figure 2f dotplots**
+
+```{r input_seurat}
+merge <- readRDS(file.path("data","covid_flu.CITEseq.Seurat.obj.RDS"))
+merge$visit.sex.group <- paste(merge$visit, merge$sex, merge$group,
+                                   sep = ".")
+monoc <- subset(merge, subset = visit %in% c("Day 0","Day 1") & cell.type == "Mono_Classical")
+DefaultAssay(monoc) <- "SCT"
+
+### input LE sets
+Agpre.LE <- readRDS("data/LE_sets/mono.Agpresentation.D1.covid.m.sub.baseline.LE.rds")
+```
+
+
+dotplot for Antigen presentation LE
+Classical monocytes
+```{r dotplots, fig.width = 8, fig.height = 5.5}
+monoc$visit.sex.group <- factor(monoc$visit.sex.group, 
+                         levels = c("Day 1.Male.COVR", "Day 0.Male.COVR",
+                                    "Day 1.Male.HC", "Day 0.Male.HC",
+                                    "Day 1.Female.COVR","Day 0.Female.COVR",
+                                    "Day 1.Female.HC", "Day 0.Female.HC"))
+# put HLA genes first
+HLA_sets <- Agpre.LE[str_detect(Agpre.LE, pattern = "HLA")]
+Agpre.LE <- unique(c(HLA_sets, Agpre.LE))
+
+# pdf(file = "figures/monoc.Agpre.D1xgroupmaleLE.dotplot.fig2f.pdf", width = 8, height = 5.5)
+DotPlot(monoc, features = Agpre.LE, group.by = "visit.sex.group", dot.scale = 10, cols = c("gray95", "blue"))+
+  RotatedAxis()+theme(axis.text=element_text(size=12))+
+  scale_size(range=c(0,10))
+# dev.off()
+```
+
+
+```{r}
+sI <- sessionInfo()
+utils:::print.sessionInfo(sI[-c(10,11)])
+```
+
+
+
+
+

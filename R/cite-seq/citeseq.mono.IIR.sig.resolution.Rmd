@@ -1,0 +1,256 @@
+---
+title: "COVID Flu: CITE-Seq Innate Immune Receptor (IIR) Signature"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: True
+editor_options:
+  chunk_output_type: console
+---
+
+IIR signature is the combination of BTM M11.0 and M4.0 genesets
+
+#### Setup
+```{r setup,message=FALSE}
+library(ggplot2)
+library(knitr)
+library(dplyr)
+source('R/utils/visualization.R')
+source('R/utils/dream.models.R')
+loadLibraries()
+
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+opts_knit$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache.lazy = FALSE, out.width=900)
+
+output.folder <- file.path("output","CITE-seq")
+dir.create(output.folder)
+figure.folder <- "figures"
+dir.create(figure.folder)
+
+# cite-seq pbulk data
+pseudobulk.list.filtered <- readRDS(file.path(output.folder,"covid_flu.CITEseq.pseudobulk.gene.expr.filtered.RDS"))
+cat("Cell subsets:",names(pseudobulk.list.filtered))
+
+# genesets and celltypes of interest
+wb.genesets <- c("enriched in monocytes (II) (M11.0)","cell cycle and transcription (M4.0)")
+mono.subsets <- c("Mono_Classical","Mono_NonClassical")
+
+dea.files <- list.files(file.path(output.folder,"DEA"),pattern = "vaccine.response.gene",full.names = T)
+cite_de_model_results <- do.call(rbind,lapply(dea.files[grep(paste0(mono.subsets,collapse = "|"),dea.files)],read.csv))
+gsea.files <- list.files(file.path(output.folder,"GSEA"),pattern = "vaccine.response.gsea",full.names = T)
+gsea.results <- do.call(rbind,lapply(gsea.files[grep(paste0(mono.subsets,collapse = "|"),gsea.files)],read.csv))
+```
+
+#### Baseline leading-edge genes
+LE genes from IIR signature in mono subsets
+```{r reset}
+baseline.IIR.geneset <- subset(gsea.results,parameter %in% wb.genesets & term %in% c("Baseline.COVR.f","Baseline.COVR.m") & 
+                                   cell.type %in% mono.subsets)
+baseline.IIR.geneset$core_enrichment <- sapply(baseline.IIR.geneset$core_enrichment,strsplit,"/",fixed=T)
+baseline.IIR.geneset <- reshape2::dcast(baseline.IIR.geneset,cell.type + parameter ~ term,value.var = "core_enrichment")
+
+# merge all LE genes within a cell type
+for (i in unlist(unique(baseline.IIR.geneset$cell.type))) {
+  tmp <- subset(baseline.IIR.geneset,cell.type == i)
+  union.genes <- lapply(3:4,function(x){unique(unlist(tmp[,x]))})
+  union.genes <- cbind(cell.type = i,parameter = "Union.genesets",Baseline.COVR.f=union.genes[1],Baseline.COVR.m=union.genes[2])
+  baseline.IIR.geneset <- rbind(baseline.IIR.geneset,union.genes)
+}
+colnames(baseline.IIR.geneset)[3:4] <- c("Female","Male")
+```
+
+#### Post-vaccination shift of genes in baseline genesets
+Identify LE genes that moved towards baseline HC after vaccination
+```{r genesets}
+# COVR vs. HC
+overall.covid.v.baseline.hc <- subset(cite_de_model_results,contrast %in% c("COVR.v.baseline.HC.f","COVR.v.baseline.HC.m"))
+overall.covid.v.baseline.hc <- rbind(overall.covid.v.baseline.hc,subset(cite_de_model_results,term %in% c("Baseline.COVR.f","Baseline.COVR.m")))
+overall.covid.v.baseline.hc$sex <- "Female"
+overall.covid.v.baseline.hc[grep(".m$",overall.covid.v.baseline.hc$term),"sex"] <- "Male"
+
+overall.cell.type.genesets <- list()
+overall.covid.v.baseline.hc.new <- data.frame()
+for (i in mono.subsets) {
+  cat(i,"-\n")
+  cell.type.genesets <- list()
+  covid.v.baseline.hc <- subset(overall.covid.v.baseline.hc,cell.type == i)
+  
+  # resolving is defined as smaller abs z.std value at D1 or D28 compared to D0
+  post.vax.resolving.genes <- as.data.frame(covid.v.baseline.hc %>% group_by(sex,gene.symbol) %>% 
+  summarize(D1.resolving = (abs(z.std[visit == "D1"]) < abs(z.std[visit == "Baseline"])),
+             D28.resolving = (abs(z.std[visit == "D28"]) < abs(z.std[visit == "Baseline"]))))
+  covid.v.baseline.hc <- merge(covid.v.baseline.hc,post.vax.resolving.genes,by=c("sex","gene.symbol"))
+  overall.covid.v.baseline.hc.new <- rbind(overall.covid.v.baseline.hc.new,covid.v.baseline.hc)
+  
+  # cell type specific D0 covid vs. hc DE genes
+  baseline.de.genes <- subset(covid.v.baseline.hc,P.Value < 0.05 & visit == "Baseline" & contrast %in% c("covid.m","covid.f"))
+  baseline.de.genes <- baseline.de.genes %>% summarise(geneset="Baseline DE genes",
+             male_genes = list(gene.symbol[sex == "Male"]),
+             female_genes = list(gene.symbol[sex == "Female"]))
+  # add baseline DE genes to gene list
+  cell.type.genesets$CITEseq.baseline.DE.genes["Male"] <- baseline.de.genes$male_genes
+  cell.type.genesets$CITEseq.baseline.DE.genes["Female"] <- baseline.de.genes$female_genes
+
+  # D1 reset genes, not necessarily DE at baseline
+  reset.genes <- subset(covid.v.baseline.hc,sex == "Female" & D1.resolving == T)
+  cell.type.genesets$CITEseq.D1.reset.genes[["Female"]] <- unique(reset.genes$gene.symbol)
+  reset.genes <- subset(covid.v.baseline.hc,sex == "Male" & D1.resolving == T)
+  cell.type.genesets$CITEseq.D1.reset.genes[["Male"]] <- unique(reset.genes$gene.symbol)
+  
+  # D1 and D28 reset genes, not necessarily DE at baseline
+  reset.genes <- subset(covid.v.baseline.hc,sex == "Female" & D1.resolving == T & D28.resolving == T)
+  cell.type.genesets$CITEseq.stable.reset.genes[["Female"]] <- unique(reset.genes$gene.symbol)
+  reset.genes <- subset(covid.v.baseline.hc,sex == "Male" & D1.resolving == T & D28.resolving == T)
+  cell.type.genesets$CITEseq.stable.reset.genes[["Male"]] <- unique(reset.genes$gene.symbol)
+  
+  # baseline DE genes that are reset at D1
+  reset.genes <- subset(covid.v.baseline.hc,sex == "Female" & D1.resolving == T & gene.symbol %in% unique(unlist(baseline.de.genes$female_genes)))
+  cell.type.genesets$CITEseq.baseline.DE.D1.reset.genes[["Female"]] <- unique(reset.genes$gene.symbol)
+  # baseline DE genes that are reset at D1
+  reset.genes <- subset(covid.v.baseline.hc,sex == "Male" & D1.resolving == T & gene.symbol %in% unique(unlist(baseline.de.genes$male_genes)))
+  cell.type.genesets$CITEseq.baseline.DE.D1.reset.genes[["Male"]] <- unique(reset.genes$gene.symbol)
+  
+  # baseline DE genes that are reset at D1 and D28
+  reset.genes <- subset(covid.v.baseline.hc,sex == "Female" & D1.resolving == T & D28.resolving == T &
+                          gene.symbol %in% unique(unlist(baseline.de.genes$female_genes)))
+  cell.type.genesets$CITEseq.baseline.DE.stable.reset.genes[["Female"]] <- unique(reset.genes$gene.symbol)
+  # baseline DE genes that are reset at D1
+  reset.genes <- subset(covid.v.baseline.hc,sex == "Male" & D1.resolving == T & D28.resolving == T &
+                          gene.symbol %in% unique(unlist(baseline.de.genes$male_genes)))
+  cell.type.genesets$CITEseq.baseline.DE.stable.reset.genes[["Male"]] <- unique(reset.genes$gene.symbol)
+  
+  
+  # intersect above genes with genesets of interest
+  tmp <- subset(baseline.IIR.geneset,cell.type == i)
+  expr.status <- names(cell.type.genesets)
+  for (g in 1:nrow(tmp)) {
+    for (s in c("Male","Female")) {
+      # LE genes
+      cell.type.genesets[[paste0("CITEseq.baseline.LE.",make.names(tmp[g,"parameter"]))]][s] <- tmp[g,s]
+      for (ex in expr.status) {
+        cell.type.genesets[[paste0(ex,".LE.",make.names(tmp[g,"parameter"]))]][s] <- 
+          list(intersect(unlist(tmp[g,s]), cell.type.genesets[[ex]][[s]]))
+      }
+    }
+  }
+  # union and intersect of m and f genesets
+  for (g in names(cell.type.genesets)) {
+    cell.type.genesets[[g]][["m.and.f.union"]] <- union(cell.type.genesets[[g]]$Female,cell.type.genesets[[g]]$Male)
+    cell.type.genesets[[g]][["m.and.f.intersect"]] <- intersect(cell.type.genesets[[g]]$Female,cell.type.genesets[[g]]$Male)
+  }
+  overall.cell.type.genesets[[i]] <- cell.type.genesets
+}
+# union of all cell subsets
+genesets.to.merge <- names(overall.cell.type.genesets$Mono_Classical)
+for (g in genesets.to.merge) {
+  tmp <- lapply(mono.subsets,function(x){overall.cell.type.genesets[[x]][[g]]})
+  names(tmp) <- mono.subsets
+  for (s in names(tmp$Mono_Classical)) {
+    genes <- lapply(mono.subsets,function(x){tmp[[x]][[s]]})
+    names(genes) <- mono.subsets
+    if (length(unlist(genes)) > 0) {
+      #gplots::venn(genes)
+      #title(paste0(g," - ",s))
+      overall.cell.type.genesets[["Monocytes"]][[g]][[s]] <- unique(unlist(genes))
+    }
+  }
+}
+saveRDS(overall.cell.type.genesets,file.path(output.folder,"mono.LE.and.reset.genesets.RDS"))
+geneset.name <- "CITEseq.baseline.LE.Union.genesets" # IIR signature
+```
+
+#### Geneset-level shifts
+Fig. 4b and c: Use all LE genes of the union geneset to create modules and see how they change at different timepoints
+```{r modules,fig.cap=c("Fig. 4b","Fig. 4c")}
+pdf(file.path(figure.folder,paste0("Fig4bc.pdf")),width=6,height=4.5)
+
+plots <- list()
+for (i in mono.subsets) {
+  normalized.expr.batch.effect.filtered <- pseudobulk.list.filtered[[i]]$normalizedExpr
+  geneset.list <- overall.cell.type.genesets[[i]][[geneset.name]]
+  sample.signature.scores <- GSVA::gsva(normalized.expr.batch.effect.filtered,
+                                          gset.idx.list = geneset.list,
+                                          parallel.sz=1)
+    
+  sample.info <- pseudobulk.list.filtered[[i]]$samples
+  sample.info <- cbind(sample.info,t(sample.signature.scores)[rownames(sample.info),])
+  # combine the sex-specific scores accordingly
+  sample.info$module.score <- ifelse(sample.info$sex == "Male",sample.info$Male,sample.info$Female)
+
+  # model of timepoint differences
+  sample.info <- subset(sample.info,!is.na(visit))
+  timepoint.model.fit <- timepoint.condition.model(t(sample.info[,c("module.score","m.and.f.union")]),sample.info,c("Day 0"))
+  model.de.res <- model.term.statistics(timepoint.model.fit,grep("[0-9].v.baseline.COVR",colnames(timepoint.model.fit$coefficients),value=T))
+  print(subset(model.de.res,parameter == "module.score"))
+  model.de.res <- model.term.statistics(timepoint.model.fit,grep("[0-9].v.baseline.HC",colnames(timepoint.model.fit$coefficients),value=T))
+  print(subset(model.de.res,parameter == "module.score"))
+
+  sample.info.mean <- as.data.frame(sample.info %>% 
+    group_by(alt.subject.id,visit,group,sex,age,race,flu.vax.count.10yr,covid.diagnosis.start.date.to.sample.drawn) %>% 
+    summarise(module.score=mean(module.score),union.score=mean(m.and.f.union)))
+  sample.info.mean$group <- factor(sample.info.mean$group,levels = c("HC","COVR"))
+  
+  # median of baseline HC
+  hc.baseline.median <- as.data.frame(subset(sample.info.mean,visit == "Day 0" & group == "HC") %>% 
+                  group_by(sex) %>% summarise(median.score=median(module.score)))
+
+  plots[[i]] <- ggplot(sample.info.mean, aes(x = visit, y = module.score)) +
+    geom_boxplot(aes(fill=sex),color = "black", alpha = 0.4, width = 0.75, outlier.shape = NA) +
+    geom_line(aes(group=alt.subject.id,color=sex),alpha=0.75) +
+    geom_point(aes(color=sex),size=0.5) +
+    scale_color_manual(values = c("Female"="#BD3B29", "Male"="#0472B6"))+
+    scale_fill_manual(values = c("Female"="#BD3B29", "Male"="#0472B6"))+
+    stat_compare_means(comparisons = list(c(1,2),c(1,3)), method = "wilcox.test", size = 3, paired=T) +
+    facet_grid(sex~group) +
+    scale_y_continuous(expand = c(0.03,0.17)) +
+    theme_bw(base_size = 14) + ggtitle(i) + ylab("Module score") + xlab("Timepoint") +
+    geom_hline(data=hc.baseline.median,aes(yintercept=median.score,color=sex),linetype="dashed",size=1,alpha=0.4)
+  print(plots[[i]])
+}
+dev.off()
+plots
+```
+
+#### Gene-level shifts
+ED Fig. 5a and b
+```{r ed.fig.5ab,fig.cap=c("ED Fig. 5a","ED Fig. 5b")}
+# visualize for each gene set
+pdf(file.path(figure.folder,"ED.Fig.5ab.pdf"),width=6,height=4)
+to.highlight=list(Mono_Classical=c("NOD2","TLR2","CLEC4E"),Mono_NonClassical=c("TLR4","FPR2","ITGAM"))
+visit.colors <- c(Baseline="#CDF0EA",D1="grey80",D28="#C7D36F")
+
+plots <- list()
+for (i in mono.subsets) {
+  cat(i,"-\n")
+  cell.type.genesets <- overall.cell.type.genesets[[i]]
+  covid.v.baseline.hc <- subset(overall.covid.v.baseline.hc.new,cell.type == i)
+  
+  # separate sex
+  geneset.fc <- rbind(subset(covid.v.baseline.hc,sex == "Female" & gene.symbol %in% cell.type.genesets[[geneset.name]]$Female),
+                      subset(covid.v.baseline.hc,sex == "Male" & gene.symbol %in% cell.type.genesets[[geneset.name]]$Male))
+  
+  # wilcoxon test
+  cat("Wilcoxon test p value for post-vaccination gene expression changes:\n")
+  print(reshape2::dcast(geneset.fc,gene.symbol + sex ~ visit,value.var = "z.std") %>% group_by(sex) %>%
+    summarise(D1.pval=wilcox.test(D1,Baseline,paired=T)$p.value,D28.pval=wilcox.test(D28,Baseline,paired=T)$p.value))
+  
+  # reverse the order of the visits
+  geneset.fc$visit <- factor(geneset.fc$visit,levels=c("D28","D1","Baseline"))
+  if (nrow(geneset.fc) > 0) {
+    plots[[i]] <- geneset.ridge.plot(geneset.fc,to.highlight[[i]]) + ggtitle(i) + scale_y_discrete(expand=c(0.05,0.05)) + 
+      scale_fill_manual(values = visit.colors)
+    print(plots[[i]])
+  }
+}
+dev.off()
+plots
+```
+
+#### Session Info
+```{r session}
+sessionInfo()
+```
+

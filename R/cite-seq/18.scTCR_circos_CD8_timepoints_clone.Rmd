@@ -1,0 +1,209 @@
+---
+title: "scTCR_circos_CD8_timepoints_clone"
+output: html_document
+date: "2023-01-12"
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(circlize)
+library(tidyverse)
+library(ggpubr)
+library(RColorBrewer)
+```
+
+## single cell TCR clonality in COVR CD8-EM GPR56+ subset at different timepoints
+Plot D0, D1, D28 CD8 subsets TCR clonality circos plot by connecting identical clones in each subject ACROSS timepoints to show the clone freq change (shared clones for each individual at different timepoints)
+**Generate circos plot for Extended Data Figure 4i**  
+Single cell TCR data downloaded from Zenodo and put in data/TCR/ folder as input  
+
+```{r input}
+tcr_combined <- read.csv(file.path("data", "TCR", "tenx_filtered_scTCR_anno.csv"))
+tcr_combined_CD8 <- filter(tcr_combined, coarse.cell.type == "CD8") %>%
+  mutate(cell.type.GPR56 = paste(cell.type, GPR56_level, sep = "-")) %>%
+  mutate(cellsubset = replace(.$cell.type, .$cell.type %in% c("CD8_EM","CD8_TEMRA"), .$cell.type.GPR56[which(.$cell.type %in% c("CD8_EM","CD8_TEMRA"))])) %>%
+  filter(cellsubset %in% c("CD8_CM", "CD8_EM-GPR56-", "CD8_EM-GPR56+", "CD8_Naive", "CD8_TEMRA-GPR56+", "CD8_TRM")) %>%
+  mutate(sample_id = sub(pattern = "Day ", replacement = "D", paste(alt.subject.id, visit, sep = ".")))
+
+tcr_combined_CD8_GPR56 <- filter(tcr_combined_CD8, 
+                                 cellsubset == "CD8_EM-GPR56+",
+                                 group == "COVR")
+
+# further down sample, otherwise link too dense
+set.seed(124)
+tcr_combined_CD8_GPR56_ds <- tcr_combined_CD8_GPR56 %>%
+  group_by(visit) %>%
+  sample_n(size = 600, replace = F)
+
+# sample first to make each subject have the same number of cells at each timepoint
+tcr_combined_CD8_GPR56_ds2 <- data.frame()
+for (i in unique(tcr_combined_CD8_GPR56_ds$alt.subject.id)){
+  tmp <- filter(tcr_combined_CD8_GPR56_ds, alt.subject.id == i)
+  set.seed(124)
+  tmp.ds <- tmp %>% group_by(visit) %>% 
+    sample_n(size = min(table(tmp$visit)), replace = F) %>%
+    mutate(sample_rowindex = c(1:unique(table(.$visit))))
+  tcr_combined_CD8_GPR56_ds2 <- rbind(tcr_combined_CD8_GPR56_ds2, tmp.ds)
+}
+
+# sample to shuffle around subjects
+tcr_combined_CD8_GPR56_ds2 <- tcr_combined_CD8_GPR56_ds2 %>% 
+  group_by(visit) %>% 
+  sample_n(size = min(table(.$visit)), replace = F)
+# filter out subjects with less than 30 cells at each timepoint
+tmp <- data.frame(table(tcr_combined_CD8_GPR56$alt.subject.id,tcr_combined_CD8_GPR56$visit)) %>%
+  filter(Var2 == "Day 0") %>%
+  dplyr::arrange(desc(Freq)) %>%
+  filter(Freq > 30)
+tcr_combined_CD8_GPR56_ds2 <- tcr_combined_CD8_GPR56_ds2 %>%
+  filter(alt.subject.id %in% tmp$Var1)
+table(tcr_combined_CD8_GPR56_ds2$visit)
+
+tcr_combined_CD8_GPR56_ds2 <- dplyr::arrange(tcr_combined_CD8_GPR56_ds2, visit, sex, group) %>%
+  dplyr::ungroup() %>%
+  mutate(visit_rowindex = rep(c(1:unique(table(.$visit))),3)) %>%
+  mutate(rowindex = 1:nrow(.)) %>%
+  mutate(visit.sex = paste(visit, sex, sep = "."))
+table(tcr_combined_CD8_GPR56_ds2$visit.sex)
+tcr_combined_CD8_GPR56_ds2$sex_rowindex <- rep(c(1:113, 1:251),3)
+```
+
+Label clones and index them  
+```{r clone}
+clone_id <- data.frame(table(tcr_combined_CD8_GPR56_ds2$CTaa_tcr)) %>%
+  mutate(clone_id = paste("C",1:nrow(.), sep = ""))
+tcr_combined_CD8_GPR56_ds2 <- left_join(tcr_combined_CD8_GPR56_ds2, clone_id, by = c("CTaa_tcr" = "Var1"))
+
+tcr_cells = tcr_combined_CD8_GPR56_ds2[,c("alt.subject.id","visit","sample_id","Timepoint.sex.group", "sex","group", "cellsubset", "sample_rowindex", "visit_rowindex", "rowindex", "clone_id", "barcode.batch", "sex_rowindex", "visit.sex")]
+tcr_cells$Timepoint.subject <- paste(tcr_cells$visit, tcr_cells$sex, tcr_cells$alt.subject.id, sep = ".")
+tcr_cells$Timepoint.clone <- paste(tcr_cells$visit, tcr_cells$sex, tcr_cells$clone_id, sep = ".")
+tcr_cells <- dplyr::arrange(tcr_cells, visit, sex, group, clone_id, alt.subject.id)
+timeclone_rowindex = c()
+for (i in 1:length(table(tcr_cells$Timepoint.clone))){
+  index = seq_len(as.numeric(table(tcr_cells$Timepoint.clone))[i])
+  timeclone_rowindex = c(timeclone_rowindex, index)
+}
+tcr_cells$timeclone_rowindex <- timeclone_rowindex
+
+# link identical TCR clone with lines
+tcr_links <- select(tcr_cells, c("alt.subject.id", "Timepoint.subject", "clone_id", "barcode.batch", "visit", "sex")) %>%
+  mutate(subject.clone = paste(alt.subject.id, clone_id, sep = "."))
+
+tcr_links_dup <- tcr_links[duplicated(tcr_links$subject.clone) | duplicated(tcr_links$subject.clone, fromLast = TRUE), ] %>%
+  left_join(tcr_links[,c("subject.clone","barcode.batch", "visit")], by = "subject.clone")
+
+tcr_links_dup <- tcr_links_dup[!tcr_links_dup$barcode.batch.x == tcr_links_dup$barcode.batch.y,]
+tcr_links_dup <- tcr_links_dup[!tcr_links_dup$visit.x == tcr_links_dup$visit.y,]
+
+```
+
+
+Circos plots for CD8 subsets at D0 (baseline)  
+**Extended Data Fig 4i**  
+**Inner circle was colored by identical TCR clones**  
+```{r circos, fig.width=8.6, fig.height=8.6}
+n_cells <- nrow(tcr_cells)
+tcr_cells$xmin <- 0
+tcr_cells$xmax = n_cells
+
+ring_colors <- list(c("#CDF0EA","grey80","#C7D36F"), 
+                    c(brewer.pal(n = 8,name = "Set1"),
+                      brewer.pal(n = 8,name = "Set2"),
+                      brewer.pal(n = 8,name = "Set3")),
+                    c("#BD3B29","#0472B6"))
+names(ring_colors[[1]]) <- unique(tcr_cells$visit)
+names(ring_colors[[3]]) <- c("Female", "Male")
+clone_colors = data.frame("clone_colors" = c(rep(ring_colors[[2]],24))[-c(1:12)],
+                          "clone_id" = unique(tcr_cells$clone_id))
+sex_colors = data.frame("sex_colors" = c("#BD3B29","#0472B6"),
+                        "sex" = unique(tcr_cells$sex))
+visit_colors = data.frame("visit_colors" = ring_colors[[1]],
+                          "visit" = unique(tcr_cells$visit))
+colors_df <- filter(data.frame(table(tcr_cells$Timepoint.clone, tcr_cells$clone_id)), Freq != 0) %>%
+  arrange(Var1) %>%
+  left_join(clone_colors, by = c("Var2" = "clone_id")) %>%
+  mutate(Timepoint.sex = str_extract(Var1, pattern = "Day \\d.+ale")) %>%
+  separate(Var1, into = c("visit","sex","clone_id"), sep = "\\.") %>%
+  left_join(sex_colors, by = "sex") %>%
+  left_join(visit_colors, by = "visit")
+
+ring_colors_clone <- colors_df$clone_colors
+ring_colors_sex <- colors_df$sex_colors
+ring_colors_visit <- colors_df$visit_colors
+
+# pdf("figures/CD8_GPR56high_circos_across.timepoint.clone_EDFig4i.pdf", width = 8.6, height = 8.6)
+circlize::circos.clear()
+circlize::circos.par(
+  cell.padding=c(0,0,0,0), track.margin=c(0,0.15), start.degree = 90, gap.degree = 0)
+
+# sector details
+{circlize::circos.initialize(factors=tcr_cells$Timepoint.clone,
+                            xlim=matrix(c(rep(0, 719), table(tcr_cells$Timepoint.clone)), ncol=2))
+
+circlize::circos.trackPlotRegion(
+  ylim = c(0, 1), 
+  track.height = 0.2,
+  # bg.col=ring_colors2,
+  bg.border=F,
+  panel.fun = function(x, y) {
+    name = circlize::get.cell.meta.data("sector.index")
+    i = circlize::get.cell.meta.data("sector.numeric.index")
+    xlim = circlize::get.cell.meta.data("xlim")
+    ylim = circlize::get.cell.meta.data("ylim")
+ 
+    circlize::circos.rect(
+      xleft=xlim[1], ybottom=ylim[1],
+      xright=xlim[2], ytop=ylim[2]-0.66,
+      col = ring_colors_clone[i],
+      border = ring_colors_clone[i])
+    
+    circlize::circos.rect(
+      xleft=xlim[1], ybottom=ylim[1]+0.33,
+      xright=xlim[2], ytop=ylim[2]-0.33,
+      col = ring_colors_sex[i],
+      border = ring_colors_sex[i])
+    
+    circlize::circos.rect(
+      xleft=xlim[1], ybottom=ylim[1]+0.66,
+      xright=xlim[2], ytop=ylim[2],
+      col = ring_colors_visit[i],
+      border = ring_colors_visit[i])
+    
+  })    
+
+for (k in 1:nrow(tcr_links_dup)) {
+  # determine row of tcr_cells to use for coloring
+  i <- match(tcr_links_dup$barcode.batch.x[k], tcr_cells$barcode.batch)
+  j <- match(tcr_links_dup$barcode.batch.y[k], tcr_cells$barcode.batch)
+  
+  # draw links, colored by selected variable
+  circlize::circos.link(
+    sector.index1=tcr_cells$Timepoint.clone[i], point1=c(tcr_cells$timeclone_rowindex[i]),
+    sector.index2=tcr_cells$Timepoint.clone[j], point2=c(tcr_cells$timeclone_rowindex[j]),
+    col = unique(colors_df[colors_df$clone_id == tcr_cells$clone_id[i], "clone_colors", drop=TRUE]), 
+    rou1=0.65, rou2=0.65, h.ratio = 0.4, lwd = 0.2
+  )
+}
+
+legend(x = "topleft", legend = names(c(ring_colors[[3]],ring_colors[[1]])), fill = c(ring_colors[[3]],ring_colors[[1]]), bty = "n", y.intersp = 1)
+
+circos.clear()
+}
+
+# dev.off()
+```
+
+
+SessionInfo  
+```{r}
+sI <- sessionInfo()
+utils:::print.sessionInfo(sI[-c(10,11)])
+```
+
+
+
+
+
+
+
+

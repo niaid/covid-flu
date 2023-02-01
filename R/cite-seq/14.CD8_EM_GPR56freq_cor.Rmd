@@ -1,0 +1,94 @@
+---
+title: "CD8_EM_GPR56freq_cor"
+output: html_document
+date: "2023-01-09"
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(Seurat)
+library(edgeR)
+library(GSVA)
+library(tidyverse)
+library(Biobase)
+library(reshape2)
+library(ggpubr)
+library(readr)
+```
+
+## The correlation of effect memory CD8 baseline activation score vs. GPR56+ freq  
+effect memory CD8 baseline activation score calculated using BTM-M7.3 LE genes as in Fig 1i  
+Run the pseudobulk baseline CD8 score calculation first (D0_pseudobulk_blscore_CD8.Rmd) as input for the geneset scores  
+**Generate Extended Data Figure 4e boxplots**  
+
+```{r input_scores}
+# input pseudobulk list from dream model
+DGELISTS_IN_PATH <- "output/CITE-seq/covid_flu.CITEseq.pseudobulk.gene.expr.filtered.RDS"
+OUT_DIR <- "output/pbulk/gsva/"
+dir.create(OUT_DIR, recursive = TRUE)
+pbulk_list <- readRDS(DGELISTS_IN_PATH)
+
+# read in module scores calculated from D0_pseudobulk_blscore_CD8.Rmd
+module.scores.df <- read.csv(paste(OUT_DIR, "module_score_gsva_filtered_samples_genes_df.CD8.M7.3.baseline.csv", sep = ""), 
+                             row.names = 1)
+module.scores.df$age <- NULL
+module.scores.df$group.timepoint <- paste(module.scores.df$group, module.scores.df$visit, sep = ".")
+module.scores.df$group.timepoint <- factor(module.scores.df$group.timepoint, levels = c("HC.Day 0","HC.Day 1","HC.Day 28","COVR.Day 0","COVR.Day 1","COVR.Day 28"))
+module.scores.df$sample_id <- paste(module.scores.df$alt.subject.id, module.scores.df$visit.overall.group.sex, sep = ".")
+
+# calculate mean for some duplicated samples
+meta <- pbulk_list$Mono$samples[,c("alt.subject.id", "age", "Batch","visit","sex","race","group","flu.vax.count.10yr","vaccine.side.effects","long.covid.symptoms", "visit.overall.group.sex")] 
+meta$sample <- rownames(meta)
+meta$sample_id <- paste(meta$alt.subject.id, meta$visit.overall.group.sex, sep = ".")
+meta.sample <- meta[,c("sample_id","alt.subject.id", "visit", "sex", "race", "group", "flu.vax.count.10yr", "vaccine.side.effects", "long.covid.symptoms", "visit.overall.group.sex")] %>%
+  distinct() %>%
+  filter(alt.subject.id != "Control")
+module.scores.df.sample <- module.scores.df %>% group_by(celltype, geneset, sample_id) %>%
+  dplyr::summarise(module.score.mean = mean(module.score)) %>%
+  inner_join(meta.sample, by=c("sample_id"))
+
+module.scores.df.sample <- filter(module.scores.df.sample, visit == "Day 0") %>%
+  mutate(sex.group = factor(paste(sex, group, sep = "."), levels = c("Female.HC","Female.COVR","Male.HC","Male.COVR"))) %>%
+  mutate(group = factor(group, levels = c("HC","COVR")) )
+```
+
+
+Calculate CD8-EM GPR56+ cell freq from CITE-seq  
+
+```{r input_sc}
+merge <- readRDS(file.path("data","covid_flu.CITEseq.Seurat.obj.RDS"))
+CD8_EM <- subset(merge, subset = cell.type == "CD8_EM")
+CD8_EM$sample_id <- paste(CD8_EM$alt.subject.id, CD8_EM$visit, CD8_EM$group, CD8_EM$sex, sep = ".")
+CD8_EM$sample_id <- sub("ay ", "", x = CD8_EM$sample_id)
+CD8_EM$GPR56_level = ifelse(CD8_EM@assays$CITE@data["PROT-GPR56",] > 1.5, "GPR56+", "GPR56-")
+CD8_EM.d0 <- subset(CD8_EM, subset = visit %in% c("Day 0"))
+# calculate freq
+GPR56_freq <- data.frame(table(CD8_EM.d0$sample_id, CD8_EM.d0$GPR56_level)) %>%
+  dplyr::group_by(Var1) %>% dplyr::mutate(ratio = Freq/sum(Freq)) %>%
+  reshape2::dcast(Var1 ~ Var2, value.var = "ratio")
+summary(GPR56_freq$Var1 %in% module.scores.df.sample$sample_id)
+colnames(GPR56_freq) <-c("sample_id","GPR56_low_ratio","GPR56_high_ratio")
+module.scores.df.sample.EM <- left_join(filter(module.scores.df.sample, celltype == "CD8_EM", visit == "Day 0", geneset == "m.and.f.union"), GPR56_freq, by = c("sample_id")) %>%
+  mutate(group = factor(group, levels = c("HC","COVR")))
+```
+
+
+Use male and female union LE set scores for correlation since both male and female subjects are included  
+**Extended Data Fig 4e**
+```{r corplot, fig.width = 7, fig.height = 5}
+# pdf("figures/CD8_EM.M7.3.GPR56freq.corspearman.D0.EDFig4e.pdf", width = 7, height = 5)
+ggplot(module.scores.df.sample.EM, aes(x = GPR56_high_ratio, y = module.score.mean)) +
+  geom_point(aes(color = sex, shape = group),size = 4)+
+  scale_color_manual(values = c("Female"="#BD3B29", "Male"="#0472B6"))+
+  # facet_wrap(~geneset, scale = "free", ncol = 5)+
+  geom_smooth(method = "lm", linetype = "dashed", size = 1, color = "grey30")+
+  stat_cor(size = 7, method = "spearman", cor.coef.name = "rho")+
+  theme_bw(base_size = 25)
+# dev.off()
+
+```
+
+
+
+
+
